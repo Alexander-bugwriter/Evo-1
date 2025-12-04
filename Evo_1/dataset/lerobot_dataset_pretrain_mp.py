@@ -128,6 +128,7 @@ def _process_parquet_file_worker(args):
                 "action": [row["action"] for _, row in sub_df.iterrows()],
                 "video_paths": video_paths,
                 "timestamp": sub_df.iloc[0].get("timestamp", None),
+                "frame_index": int(sub_df.iloc[0].get("frame_index", 0)),
             }
             
             cache_subdir.mkdir(parents=True, exist_ok=True)
@@ -171,7 +172,7 @@ class LeRobotDataset(Dataset):
 
 
         if cache_dir is None:
-            self.cache_dir = Path("/home/dell/code/lintao/Evo_1/training_data_cache/")
+            self.cache_dir = Path("/opt/liblibai-models/user-workspace2/users/lyh/Evo-1/Evo_1/training_data_cache")
         else:
             self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -338,7 +339,7 @@ class LeRobotDataset(Dataset):
         return padded_tensor, mask
 
 
-    def _load_video_frame(self, video_paths: dict, timestamp: float) -> List[Image.Image]:
+    def _load_video_frame(self, video_paths: dict, timestamp: float,frame_index: int) -> List[Image.Image]:
     
         frames = []
         for view, path in video_paths.items():
@@ -379,20 +380,62 @@ class LeRobotDataset(Dataset):
                     raise
 
             elif self.video_backend == "av":
+                #import av
+                #try:
+                #    with av.open(path) as container:
+                #        for frame in container.decode(video=0):
+                #            if frame.time >= timestamp:
+                #                frames.append(Image.fromarray(frame.to_ndarray(format='rgb24')))
+                #                break
+                #import av
+                #try:
+                #    with av.open(path) as container:
+                #        video_stream = container.streams.video[0]
+                #        target_pts = int(timestamp / float(video_stream.time_base))
+                #        seek_pts = max(0, target_pts - int(1.0 / float(video_stream.time_base)))
+                #        container.seek(seek_pts, stream=video_stream)
+                #        best_frame = None
+                #        best_diff = float('inf')
+                #        for frame in container.decode(video=0):
+                #            if frame.pts is None:
+                #                continue
+                #            frame_time = float(frame.pts * video_stream.time_base)
+                #            diff = abs(frame_time - timestamp)
+                #            if diff < best_diff:
+                #                best_diff = diff
+                #                best_frame = frame
+                #            if frame_time > timestamp + 0.5:
+                #                break
+                #        if best_frame is not None:
+                #            frames.append(Image.fromarray(best_frame.to_ndarray(format='rgb24')))
+                #        else:
+                #            raise ValueError(f"No frame found near timestamp {timestamp} in {path}")
                 import av
                 try:
                     with av.open(path) as container:
-                        for frame in container.decode(video=0):
-                            if frame.time >= timestamp:
-                                frames.append(Image.fromarray(frame.to_ndarray(format='rgb24')))
-                                break
-
+                        video_stream = container.streams.video[0]
+                        fps = float(video_stream.average_rate) if video_stream.average_rate else 20.0
+                        timestamp_seconds = frame_index / fps
+                        target_pts = int(timestamp_seconds / float(video_stream.time_base))
+                        container.seek(offset=target_pts, stream=video_stream)
+                        frame = next(container.decode(video=0))
+                        frames.append(Image.fromarray(frame.to_ndarray(format='rgb24')))
                 except Exception as e:
                     print(f"Failed to read video file: {path}")
                     print(f"Error message: {str(e)}")
                     raise
             else:
                 raise NotImplementedError(f"Video backend {self.video_backend} not implemented")
+        
+        if not frames:
+            raise ValueError(
+                f"\nNo frames loaded from video!\n"
+                f"Paths: {list(video_paths.values())}\n"
+                f"Timestamp: {timestamp}\n"
+                f"Frame index: {frame_index}\n"
+                f"Video files exist but no frame met timestamp condition.\n"
+                f"Try switching to video_backend='decord'."
+            )
         
         return frames
 
@@ -411,14 +454,17 @@ class LeRobotDataset(Dataset):
             
             return self[random.randint(0, len(self.data)-1)]
  
-        
+        #print(f"\n[DEBUG] Loading cache: {cache_filepath}")
+        #print(f"[DEBUG] video_paths: {item['video_paths']}")
+        #print(f"[DEBUG] timestamp: {item['timestamp']}")
+
         arm_key = item["arm_key"]
         dataset_key = item["dataset_key"]
         embodiment_id = self.arm_to_embodiment_id[arm_key]
 
  
         try:
-            frames = self._load_video_frame(item["video_paths"], item["timestamp"])
+            frames = self._load_video_frame(item["video_paths"], item["timestamp"],item["frame_index"])
         except Exception as e:
       
             logging.info(f"skipping sample that cannot decode video {self.data[idx]}: {e}")

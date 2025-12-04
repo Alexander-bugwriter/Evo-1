@@ -11,7 +11,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from torch.optim.lr_scheduler import LambdaLR
-from Evo1 import EVO1
+from Evo1_cut3r import EVO1
 from accelerate import Accelerator 
 import logging
 from datetime import datetime
@@ -74,6 +74,10 @@ def custom_collate_fn(batch):
     state_mask = torch.stack([item["state_mask"] for item in batch], dim=0)
     embodiment_ids = torch.stack([item["embodiment_id"] for item in batch], dim=0)
 
+    spatial_tokens = None
+    if "spatial_tokens" in batch[0]:
+        spatial_tokens = torch.stack([item["spatial_tokens"] for item in batch], dim=0)
+
     return {
         "prompts": prompts,
         "images": images,
@@ -82,7 +86,8 @@ def custom_collate_fn(batch):
         "action_mask": action_mask,
         "state_mask": state_mask,
         "image_masks": image_masks,
-        "embodiment_ids": embodiment_ids
+        "embodiment_ids": embodiment_ids,
+        "spatial_tokens": spatial_tokens  # 🔥 新增
     }
 
 def get_lr_lambda(warmup_steps, total_steps, resume_step=0):
@@ -147,19 +152,18 @@ def prepare_dataset(config: dict) -> torch.utils.data.Dataset:
     binarize_gripper = get_with_warning(config, "binarize_gripper", False)
     use_augmentation = get_with_warning(config, "use_augmentation", False)
     if dataset_type == "lerobot":
-        from dataset.lerobot_dataset_pretrain_mp import LeRobotDataset 
+        from dataset.lerobot_dataset_cut3r import LeRobotDatasetCut3r
         import yaml
         with open(config.get("dataset_config_path"), 'r') as f:
             dataset_config = yaml.safe_load(f)
 
-        dataset = LeRobotDataset(
-            config=dataset_config,
+        dataset = LeRobotDatasetCut3r(
+            #config=dataset_config,
             image_size=image_size,
             max_samples_per_file=max_samples,
             action_horizon=horizon,
             binarize_gripper=binarize_gripper,
-            use_augmentation=use_augmentation,
-            #video_backend="decord",
+            use_augmentation=use_augmentation
         )
     else:
         raise ValueError(f"Unknown dataset_type: {dataset_type}")
@@ -348,6 +352,7 @@ def train(config):
     dataloader = prepare_dataloader(dataset, config)
 
     # === Model ===
+    config["training"] = True  # 🔥 新增
     model = EVO1(config)
     model.train()
     model.set_finetune_flags()
@@ -440,11 +445,27 @@ def train(config):
             state_mask = batch["state_mask"]
             embodiment_ids = batch["embodiment_ids"]
             fused_tokens_list = []
+            spatial_tokens_batch = batch["spatial_tokens"]  # 🔥 新增
             
-            for prompt, images, image_mask in zip(prompts, images_batch, image_masks):
-                fused = model.get_vl_embeddings(images=images, image_mask=image_mask, prompt=prompt, return_cls_only=False)
+            
+            # for prompt, images, image_mask in zip(prompts, images_batch, image_masks):
+            #     fused = model.get_vl_embeddings(images=images, image_mask=image_mask, prompt=prompt, return_cls_only=False)
+            #     fused_tokens_list.append(fused.to(dtype=torch.bfloat16))
+            for i, (prompt, images, image_mask) in enumerate(zip(prompts, images_batch, image_masks)):
+                # 取出当前样本的 spatial_tokens
+                spatial_tokens = None
+                if spatial_tokens_batch is not None:
+                    spatial_tokens = spatial_tokens_batch[i]  # [N, 730, 768]
+                
+                fused = model.get_vl_embeddings(
+                    images=images, 
+                    image_mask=image_mask, 
+                    prompt=prompt, 
+                    return_cls_only=False,
+                    spatial_tokens=spatial_tokens  # 🔥 传入
+                )
                 fused_tokens_list.append(fused.to(dtype=torch.bfloat16))
-            
+
             fused_tokens = torch.cat(fused_tokens_list, dim=0)
 
             with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -515,7 +536,7 @@ def train(config):
                     loss=loss,
                     accelerator=accelerator,
                     config=config,
-                    norm_stats=dataset.arm2stats_dict 
+                    norm_stats=dataset.norm_stats
                 )
                 accelerator.print("end to save best checkpoint")
                 if accelerator.is_main_process:
@@ -526,10 +547,10 @@ def train(config):
             # === Save periodic checkpoint ===
             if step % ckpt_interval == 0 and step > 0:
                 checkpoint_path = os.path.join(save_dir, f"checkpoint_step_{step}.pt")
-                save_checkpoint(save_dir, step=step, model_engine=model_engine, loss=loss, accelerator=accelerator, config=config, norm_stats=dataset.arm2stats_dict)
+                save_checkpoint(save_dir, step=step, model_engine=model_engine, loss=loss, accelerator=accelerator, config=config, norm_stats=dataset.norm_stats)
          
     # === Save final model ===
-    save_checkpoint(save_dir, step="final", model_engine=model_engine, loss=loss, accelerator=accelerator, config=config, norm_stats=dataset.arm2stats_dict)
+    save_checkpoint(save_dir, step="final", model_engine=model_engine, loss=loss, accelerator=accelerator, config=config, norm_stats=dataset.norm_stats)
     logging.info(f"Final model saved to step_final/")
     logging.info(f"Best checkpoint saved to step_best/ with loss {best_loss:.6f}")
 
@@ -547,6 +568,7 @@ if __name__ == "__main__":
     parser.add_argument("--disable_wandb", action="store_true", help="Disable wandb logging.")
 
     # Dataset
+    # parser.add_argument("--dataset_type", type=str, default="lerobot")
     parser.add_argument("--dataset_type", type=str, default="lerobot")
     parser.add_argument("--data_paths", type=str, required=False)
     parser.add_argument("--dataset_config_path", type=str, required=True)
@@ -577,7 +599,12 @@ if __name__ == "__main__":
     # Finetuning
     parser.add_argument("--finetune_vlm", action="store_true")
     parser.add_argument("--finetune_action_head", action="store_true")
-
+    parser.add_argument("--finetune_fusion_block", action="store_true")  # 🔥 新增
+    
+    # 🔥 CUT3R 相关
+    parser.add_argument("--use_cut3r", action="store_true")
+    parser.add_argument("--cut3r_weights", type=str, default=None)
+    
     # Misc
     parser.add_argument("--per_action_dim", type=int, default=7)
     parser.add_argument("--state_dim", type=int, default=7)

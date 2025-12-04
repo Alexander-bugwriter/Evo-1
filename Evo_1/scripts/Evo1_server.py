@@ -15,6 +15,8 @@ from fvcore.nn import FlopCountAnalysis
 
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'flash-attention')))
+import flash_attn
 from scripts.Evo1 import EVO1
 
 
@@ -146,9 +148,9 @@ async def handle_request(websocket, model, normalizer):
 
 # === 启动服务 ===
 if __name__ == "__main__":
-    ckpt_dir = "Your/Path/To/Checkpoint"
+    #ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/libero"
     #Example: ckpt_dir = "/home/dell/checkpoints/Evo1/Evo1_MetaWorld/"
-
+    ckpt_dir="/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/lyh_train_stage_2/step_best"
     port = 9000
 
     print("Loading EVO_1 model...")
