@@ -238,7 +238,9 @@ class InternVL3Embedder(nn.Module):
             print("Warning: No valid images to process after masking.")
 
         vit_embeds = self.model.extract_feature(pixel_values)
-        fused_embeds = vit_embeds  
+        fused_embeds = vit_embeds 
+        print(f"[DEBUG] vit_embeds dtype: {vit_embeds.dtype}")
+        print(f"[DEBUG] vit_embeds shape: {vit_embeds.shape}")
         prompt = self._build_multimodal_prompt(num_tiles_list, text_prompt)
         inputs_embeds, attention_mask = self._prepare_and_fuse_embeddings(prompt, fused_embeds, image_mask, num_tiles_list)
 

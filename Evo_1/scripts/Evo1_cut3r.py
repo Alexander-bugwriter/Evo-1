@@ -9,6 +9,7 @@ import torch.nn as nn
 from model.internvl3.internvl3_embedder_cut3r import InternVL3Embedder
 from model.action_head.flow_matching import FlowmatchingActionHead
 import logging
+from scripts.cut3r_encoder_lyh import prepare_input
 
 class CrossAttentionFusion(nn.Module):
     def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads):
@@ -74,27 +75,18 @@ class EVO1(nn.Module):
         self.use_cut3r = config.get("use_cut3r", False)
         is_training = config.get("training", True)
         if self.use_cut3r and not is_training:
-            from scripts.cut3r_spatial_encoder import (
-                Cut3rSpatialTower, Cut3rSpatialConfig
-            )
+            from scripts.cut3r_encoder_lyh import CUT3REncoder
             
-            cut3r_config = Cut3rSpatialConfig(
-                weights_path="/opt/liblibai-models/user-workspace2/users/lyh/lyh_openpi_train/src/openpi/models_pytorch/spatial_encoder_checkpoint/cut3r_512_dpt_4_64.pth",
-                spatial_tower_select_feature="all",
-                spatial_tower_select_layer=-1,
-                export_point_cloud=False
-            )
+            cut3r_weights = "/opt/liblibai-models/user-workspace2/users/lyh/Evo-1/Evo_1/spatial_encoder_checkpoint/cut3r_512_dpt_4_64.pth"
             
-            self.spatial_tower = Cut3rSpatialTower(
-                spatial_tower='cut3r',
-                spatial_tower_cfg=cut3r_config,
-                delay_load=False
+            self.cut3r_encoder = CUT3REncoder(
+                model_path=cut3r_weights,
+                device=self._device
             )
-            self.spatial_tower.to(device=self._device, dtype=torch.float16)
-            self.spatial_tower.reset_state()
-            print(f"✅ Initialized CUT3R Spatial Tower")
+            self.cut3r_encoder.model.eval()
+            print(f"✅ Initialized new CUT3R Encoder from cut3r_encoder_lyh.py")
             
-        d_vit = 896  # InternVL3-1B的VIT维度
+        d_vit=896
         d_spatial = 768  # CUT3R输出维度
         
         self.fusion_block = CrossAttentionFusion(
@@ -144,29 +136,63 @@ class EVO1(nn.Module):
 
         
     def _extract_spatial_features(self, images):
-        if self.spatial_tower is None:
-            raise RuntimeError("spatial_tower not initialized. Set training=False in config for inference.")
-        
+        """
+    使用新的 CUT3R Encoder 提取空间特征
+    
+    Args:
+        images: List[PIL.Image] or List[torch.Tensor], 长度为3
+                对应 [agentview, wrist, dummy_proc]
+    
+    Returns:
+        spatial_tokens: [3, 730, 768]
+                        camera_token (1) + patch_tokens (729) = 730
+    """
+        if self.cut3r_encoder is None:
+            raise RuntimeError("CUT3R encoder not initialized. Set training=False in config.")
+        print(f"\n[DEBUG] Input images info:")
+        for idx, img in enumerate(images):
+            if isinstance(img, Image.Image):
+                print(f"  Image {idx}: PIL.Image, size={img.size}, mode={img.mode}")
+            elif isinstance(img, torch.Tensor):
+                print(f"  Image {idx}: Tensor, shape={img.shape}, dtype={img.dtype}, "
+                    f"range=[{img.min().item():.3f}, {img.max().item():.3f}]")
+            else:
+                print(f"  Image {idx}: {type(img)}")
+        # ========== 1. 图像预处理 ==========
         processed = []
         for img in images:
-            if isinstance(img, Image.Image):
-                img = T.ToTensor()(img)
-            if img.dtype != torch.uint8:
-                img = (img * 255).clamp(0, 255).to(torch.uint8)
-            img = img.to(self._device, dtype=torch.float16) / 127.5 - 1.0
+        # 归一化到 [-1, 1]
+            img = img * 2.0 - 1.0
+            img = img.to(self._device, dtype=torch.bfloat16)
             processed.append(img)
+        # ========== 2. 组织成 [F, B, C, H, W] 格式 ==========
+        # F=1 (单帧), B=3 (3个视角)
+        pixel_values = torch.stack(processed, dim=0).unsqueeze(0)  # [1, 3, C, H, W]
+        print(f"[_extract_spatial_features] Input shape: {pixel_values.shape}")
+        # ========== 3. Prepare input for CUT3R ==========
+        views = prepare_input(
+            pixel_values=pixel_values,
+            device=self._device,
+            target_size=432  # CUT3R 的目标尺寸
+        )
         
-        batch = torch.stack(processed).unsqueeze(0)  # [1, N, C, H, W]
-        
+        # ========== 4. Forward through CUT3R ==========
         with torch.no_grad():
-            camera_tokens, patch_tokens = self.spatial_tower(batch)
-            # camera_tokens: [N=3, 1, 768]
-            # patch_tokens: [N=3,729, 768]
-           
-            # 🔥 拼接 camera 和 patch
-            spatial_tokens = torch.cat([camera_tokens, patch_tokens], dim=1)  # [N, 730, 768]
+            results, camera_tokens, patch_tokens = self.cut3r_encoder.forward(views)
         
-        return spatial_tokens.to(dtype=torch.bfloat16)  
+        # camera_tokens: [F*B, 1, 768] = [1*3, 1, 768] = [3, 1, 768]
+        # patch_tokens: [F*B, 729, 768] = [3, 729, 768]
+        
+        print(f"[_extract_spatial_features] camera_tokens: {camera_tokens.shape}")
+        print(f"[_extract_spatial_features] patch_tokens: {patch_tokens.shape}")
+        
+        # ========== 5. 拼接 camera 和 patch tokens ==========
+        # 拼接后: [3, 730, 768]
+        spatial_tokens = torch.cat([camera_tokens, patch_tokens], dim=1)
+        
+        print(f"[_extract_spatial_features] Output spatial_tokens: {spatial_tokens.shape}")
+        
+        return spatial_tokens.to(dtype=torch.bfloat16)
         
     def get_vl_embeddings(
         self,
@@ -190,7 +216,7 @@ class EVO1(nn.Module):
                 spatial_tokens = spatial_tokens.to(dtype=torch.bfloat16)
         else:
             spatial_tokens = None  # 不使用 CUT3R
-
+        
         if images is None or len(images) == 0:
             raise ValueError("Must provide at least one image (PIL.Image). Got `images=None` or empty list.")
         return self.embedder.get_fused_image_text_embedding_from_tensor_images(
@@ -239,8 +265,10 @@ class EVO1(nn.Module):
         prompt: str,
         state_input: Union[list, torch.Tensor],
         return_cls_only: Union[bool, None] = None,
-        action_mask: Union[torch.Tensor, None] = None
+        action_mask: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
+
+        
 
         fused_tokens = self.get_vl_embeddings(
                         images=images,
@@ -269,19 +297,16 @@ class EVO1(nn.Module):
         config = self.config  
         if not config.get("finetune_vlm", False):
             self._freeze_module(self.embedder, "VLM (InternVL3)")
-            print("Freezing VLM (InternVL3)...")
         else:
             print("Finetuning VLM (InternVL3)...")
 
         if not config.get("finetune_action_head", False):
             self._freeze_module(self.action_head, "Action Head")
-            print("Freezing Action Head...")
         else:
             print("Finetuning Action Head...")
 
         
         if not config.get("finetune_fusion_block", False):
             self._freeze_module(self.fusion_block, "Fusion Block")
-            print("Freezing Fusion Block...")
         else:
             print("Finetuning Fusion Block...")

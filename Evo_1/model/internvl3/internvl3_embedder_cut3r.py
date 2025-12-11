@@ -249,6 +249,8 @@ class InternVL3Embedder(nn.Module):
        # print(f"🔍 vit_embeds shape: {vit_embeds.shape}")  # 🔥 添加这行
        # print(f"🔍 pixel_values shape: {pixel_values.shape}")
        # print(f"🔍 num_tiles_list: {num_tiles_list}")
+        #print(f"[DEBUG] vit_embeds dtype: {vit_embeds.dtype}")
+        #print(f"[DEBUG] vit_embeds shape: {vit_embeds.shape}")
 
         # fused_embeds = vit_embeds  
         if self.fusion_block is not None and spatial_tokens is not None:
@@ -264,6 +266,9 @@ class InternVL3Embedder(nn.Module):
             #print(f"✅ Applied spatial fusion: {vit_embeds.shape} + {spatial_tokens.shape} -> {fused_embeds.shape}")
         else:
             fused_embeds = vit_embeds
+       # print(f"[DEBUG] fused_embeds dtype: {fused_embeds.dtype}")
+        #print(f"[DEBUG] fused_embeds shape: {fused_embeds.shape}")
+        fused_embeds = fused_embeds.to(dtype=torch.bfloat16)
         prompt = self._build_multimodal_prompt(num_tiles_list, text_prompt)
         inputs_embeds, attention_mask = self._prepare_and_fuse_embeddings(prompt, fused_embeds, image_mask, num_tiles_list)
 
