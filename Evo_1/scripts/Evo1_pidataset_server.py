@@ -11,13 +11,10 @@ import torch
 from PIL import Image
 from torchvision import transforms
 from fvcore.nn import FlopCountAnalysis
-
-
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'flash-attention')))
 import flash_attn
-from scripts.Evo1 import EVO1
+from scripts.Evo1_cut3r import EVO1
 
 
 
@@ -38,16 +35,34 @@ class Normalizer:
                 raise ValueError(f"Input length {x.shape[0]} exceeds expected 24")
             return x
 
-        if len(stats) != 1:
+        #if len(stats) != 1:
+        #    raise ValueError(f"norm_stats.json should contain only one robot key, but: {list(stats.keys())}")
+
+        #robot_key = list(stats.keys())[0]
+        #robot_stats = stats[robot_key]
+
+        #self.state_min = pad_to_24(robot_stats["observation.state"]["min"])
+        #self.state_max = pad_to_24(robot_stats["observation.state"]["max"])
+        #self.action_min = pad_to_24(robot_stats["action"]["min"])
+        #self.action_max = pad_to_24(robot_stats["action"]["max"])
+        if "state" in stats and "actions" in stats:
+            # 新格式：直接是 {"state": {...}, "actions": {...}}
+            robot_stats = stats
+            state_key = "state"
+            action_key = "actions"
+        elif len(stats) == 1:
+            robot_key = list(stats.keys())[0]
+            robot_stats = stats[robot_key]
+            state_key = "observation.state"
+            action_key = "action"
+        else:
             raise ValueError(f"norm_stats.json should contain only one robot key, but: {list(stats.keys())}")
 
-        robot_key = list(stats.keys())[0]
-        robot_stats = stats[robot_key]
 
-        self.state_min = pad_to_24(robot_stats["observation.state"]["min"])
-        self.state_max = pad_to_24(robot_stats["observation.state"]["max"])
-        self.action_min = pad_to_24(robot_stats["action"]["min"])
-        self.action_max = pad_to_24(robot_stats["action"]["max"])
+        self.state_min = pad_to_24(robot_stats[state_key]["min"])
+        self.state_max = pad_to_24(robot_stats[state_key]["max"])
+        self.action_min = pad_to_24(robot_stats[action_key]["min"])
+        self.action_max = pad_to_24(robot_stats[action_key]["max"])
 
     def normalize_state(self, state: torch.Tensor) -> torch.Tensor:
         state_min = self.state_min.to(state.device, dtype=state.dtype)
@@ -69,7 +84,7 @@ def load_model_and_normalizer(ckpt_dir):
     config["finetune_vlm"] = False
     config["finetune_action_head"] = False
     config["num_inference_timesteps"] = 32
-
+    config["use_cut3r"]=False
     model = EVO1(config).eval()
     ckpt_path = os.path.join(ckpt_dir, "mp_rank_00_model_states.pt")
 
@@ -148,10 +163,10 @@ async def handle_request(websocket, model, normalizer):
 
 # === 启动服务 ===
 if __name__ == "__main__":
-    ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/libero"
+    #ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/libero"
     #Example: ckpt_dir = "/home/dell/checkpoints/Evo1/Evo1_MetaWorld/"
     #ckpt_dir="/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/lyh_train_stage_2/step_best"
-    #ckpt_dir="/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/baseEvo_on_pilibero_stage2/step_best"
+    ckpt_dir="/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/baseEvo_on_pilibero_stage2/step_best"
     port = 9000
     print("Loading EVO_1 model...")
     model, normalizer = load_model_and_normalizer(ckpt_dir)

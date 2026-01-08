@@ -15,9 +15,7 @@ from fvcore.nn import FlopCountAnalysis
 
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'flash-attention')))
-import flash_attn
-from scripts.Evo1 import EVO1
+from scripts.Evo1_full_cut3r import EVO1
 
 
 
@@ -38,16 +36,32 @@ class Normalizer:
                 raise ValueError(f"Input length {x.shape[0]} exceeds expected 24")
             return x
 
-        if len(stats) != 1:
+
+        if "state" in stats and "actions" in stats:
+            # 新格式：直接是 {"state": {...}, "actions": {...}}
+            robot_stats = stats
+            state_key = "state"
+            action_key = "actions"
+        elif len(stats) == 1:
+            robot_key = list(stats.keys())[0]
+            robot_stats = stats[robot_key]
+            state_key = "observation.state"
+            action_key = "action"
+        else:
             raise ValueError(f"norm_stats.json should contain only one robot key, but: {list(stats.keys())}")
 
-        robot_key = list(stats.keys())[0]
-        robot_stats = stats[robot_key]
 
-        self.state_min = pad_to_24(robot_stats["observation.state"]["min"])
-        self.state_max = pad_to_24(robot_stats["observation.state"]["max"])
-        self.action_min = pad_to_24(robot_stats["action"]["min"])
-        self.action_max = pad_to_24(robot_stats["action"]["max"])
+        self.state_min = pad_to_24(robot_stats[state_key]["min"])
+        self.state_max = pad_to_24(robot_stats[state_key]["max"])
+        self.action_min = pad_to_24(robot_stats[action_key]["min"])
+        self.action_max = pad_to_24(robot_stats[action_key]["max"])
+        # robot_key = list(stats.keys())[0]
+        # robot_stats = stats[robot_key]
+
+        # self.state_min = pad_to_24(robot_stats["observation.state"]["min"])
+        # self.state_max = pad_to_24(robot_stats["observation.state"]["max"])
+        # self.action_min = pad_to_24(robot_stats["action"]["min"])
+        # self.action_max = pad_to_24(robot_stats["action"]["max"])
 
     def normalize_state(self, state: torch.Tensor) -> torch.Tensor:
         state_min = self.state_min.to(state.device, dtype=state.dtype)
@@ -68,13 +82,18 @@ def load_model_and_normalizer(ckpt_dir):
 
     config["finetune_vlm"] = False
     config["finetune_action_head"] = False
+    config["finetune_fusion_block"] = False
     config["num_inference_timesteps"] = 32
+
+    # 🔥 硬编码启动 CUT3R
+    config["use_cut3r"] = True
+    config["training"] = False
 
     model = EVO1(config).eval()
     ckpt_path = os.path.join(ckpt_dir, "mp_rank_00_model_states.pt")
 
     checkpoint = torch.load(ckpt_path, map_location="cpu")
-    model.load_state_dict(checkpoint["module"], strict=True)
+    model.load_state_dict(checkpoint["module"], strict=False)
     model = model.to("cuda")
 
     normalizer = Normalizer(stats)
@@ -95,6 +114,9 @@ def infer_from_json_dict(data: dict, model, normalizer):
     device = "cuda"
     model_dtype = next(model.parameters()).dtype
 
+    if data.get("reset", False):
+        print("🔄 Received RESET signal, resetting CUT3R state...")
+        model.cut3r_encoder.reset_state()
   
     images = [decode_image_from_list(img) for img in data["image"]]
     assert len(images) == 3, "Must provide exactly 3 images."
@@ -123,7 +145,8 @@ def infer_from_json_dict(data: dict, model, normalizer):
             image_mask=image_mask,
             prompt=prompt,
             state_input=norm_state,
-            action_mask=action_mask
+            action_mask=action_mask,
+            
         )
         action = action.reshape(1, -1, 24)
         action = normalizer.denormalize_action(action[0])
@@ -134,25 +157,24 @@ async def handle_request(websocket, model, normalizer):
     print("Client connected")
     try:
         async for message in websocket:
-           
             json_data = json.loads(message)
             print(f"Received JSON observation")
             actions = infer_from_json_dict(json_data, model, normalizer)
             await websocket.send(json.dumps(actions))
             print("Sent action chunk")
-
-
     except websockets.exceptions.ConnectionClosed:
         print("Client disconnected.")
  
 
 # === 启动服务 ===
 if __name__ == "__main__":
-    ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/libero"
+    # ckpt_dir = "Your/Path/To/Checkpoint"
     #Example: ckpt_dir = "/home/dell/checkpoints/Evo1/Evo1_MetaWorld/"
-    #ckpt_dir="/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/lyh_train_stage_2/step_best"
-    #ckpt_dir="/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/baseEvo_on_pilibero_stage2/step_best"
+    
+    #ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/lyh_train_cut3r_stage_2/step_best"
+    ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/Evo1_cut3r_full_0115_stage3/step_best"
     port = 9000
+
     print("Loading EVO_1 model...")
     model, normalizer = load_model_and_normalizer(ckpt_dir)
 

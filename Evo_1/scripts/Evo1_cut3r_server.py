@@ -116,7 +116,10 @@ def infer_from_json_dict(data: dict, model, normalizer):
 
     if data.get("reset", False):
         print("🔄 Received RESET signal, resetting CUT3R state...")
-        model.cut3r_encoder.reset_state()
+        try:
+            model.cut3r_encoder.reset_state()
+        except:
+            print("No spatial encoder")
   
     images = [decode_image_from_list(img) for img in data["image"]]
     assert len(images) == 3, "Must provide exactly 3 images."
@@ -171,8 +174,9 @@ if __name__ == "__main__":
     # ckpt_dir = "Your/Path/To/Checkpoint"
     #Example: ckpt_dir = "/home/dell/checkpoints/Evo1/Evo1_MetaWorld/"
     
-    ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/lyh_train_cut3r_stage_2/step_best"
-    port = 9000
+    #ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/lyh_train_cut3r_stage_2/step_best"
+    ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/Evo1_cut3r_cross_attn_no_zero_init_stage2/step_best"
+    port = 9001
 
     print("Loading EVO_1 model...")
     model, normalizer = load_model_and_normalizer(ckpt_dir)

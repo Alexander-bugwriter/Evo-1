@@ -419,59 +419,55 @@ class LeRobotDatasetCUT3R(Dataset):
         view_keys: List[str]
     ) -> torch.Tensor:
         """
-        从 H5 文件加载 spatial tokens，期望形状 [B, 730, 768]
+        从 H5 文件加载 spatial tokens
         
         Args:
             h5_path: H5 文件路径
             frame_index: 帧索引
-            view_keys: 视角列表，如 ["image", "wrist_image"]
+            view_keys: 视角列表
         
         Returns:
-            spatial_tokens: [max_views, 730, 768] float32，缺失视角用0填充
+            spatial_tokens: [max_views, 730, 768] float32
         """
         spatial_tokens = []
         
-        try:
-            with h5py.File(h5_path, 'r') as h5f:
-                frame_key = f"frame_{frame_index:06d}"
-                
-                if frame_key not in h5f:
-                    raise KeyError(f"Frame {frame_key} not found in {h5_path}")
-                
-                frame_grp = h5f[frame_key]
-                
-                for view_key in view_keys:
-                    h5_key = f"observation/images/{view_key}_spatial_token"
-                    
-                    if h5_key in frame_grp:
-                        # 加载 spatial token，期望 [1, 730, 768]
-                        token = frame_grp[h5_key][:]
-                        
-                        # 验证形状
-                        if token.shape != (1, 730, 768):
-                            raise ValueError(
-                                f"Expected spatial token shape (1, 730, 768), got {token.shape} "
-                                f"for {h5_key} in {h5_path}"
-                            )
-                        
-                        # 转换为 [730, 768] float32
-                        token = torch.from_numpy(token).squeeze(0).to(torch.float32)
-                        spatial_tokens.append(token)
-                    else:
-                        # 缺失该视角，用零填充
-                        dummy_token = torch.zeros(730, 768, dtype=torch.float32)
-                        spatial_tokens.append(dummy_token)
+        # 🔥 硬编码映射：view 索引 -> H5 key
+        view_key_mapping = {
+            0: 'image',          # 第一个 view
+            1: 'wrist_image',    # 第二个 view
+        }
         
-        except Exception as e:
-            raise RuntimeError(f"Failed to load spatial tokens from {h5_path}: {e}")
         
-        # 填充到 max_views（像 images 一样）
+        with h5py.File(h5_path, 'r') as h5f:
+            frame_key = f"frame_{frame_index:06d}"
+            
+            if frame_key not in h5f:
+                raise KeyError(f"Frame {frame_key} not found in {h5_path}")
+            
+            frame_grp = h5f[frame_key]
+            
+            # 🔥 只用一个循环！
+            for i, view_key in enumerate(view_keys):
+                # 使用索引映射
+                h5_view_key = view_key_mapping.get(i, view_key)
+                h5_key = f"observation/images/{h5_view_key}_spatial_token"
+                token = frame_grp[h5_key][:]
+                # 验证形状
+                if token.shape != (1, 730, 768):
+                    raise ValueError(
+                        f"Expected spatial token shape (1, 730, 768), got {token.shape} "
+                        f"for {h5_key} in {h5_path}"
+                    )
+                # 转换为 [730, 768] float32
+                token = torch.from_numpy(token).squeeze(0).to(torch.float32)
+                spatial_tokens.append(token)
+        # 填充到 max_views
         while len(spatial_tokens) < self.max_views:
             dummy_token = torch.zeros(730, 768, dtype=torch.float32)
             spatial_tokens.append(dummy_token)
         
         # 只取前 max_views 个
-        spatial_tokens = torch.stack(spatial_tokens[:self.max_views])  # [max_views, 730, 768]
+        spatial_tokens = torch.stack(spatial_tokens[:self.max_views])
         
         return spatial_tokens
 
@@ -662,16 +658,16 @@ class LeRobotDatasetCUT3R(Dataset):
 
         action_padded, action_mask = self._pad_tensor(action, self.max_action_dim)
 
-        # ========== 5. 加载点云序列 ==========
-        future_pts3d, future_rgb, future_conf, future_mask = self._load_future_scene_sequence(
-            item["cut3r_h5_path"],
-            item["frame_index"],
-            item["episode_length"]
-        )
-
+        # ========== 5. 加载点云序列 ========== 目前不用 先注释掉用来提速
+        #future_pts3d, future_rgb, future_conf, future_mask = self._load_future_scene_sequence(item["cut3r_h5_path"],item["frame_index"],item["episode_length"])
+        
+        future_pts3d = torch.zeros(self.future_horizon, 1, 1, 3, dtype=torch.float32)
+        future_rgb = torch.zeros(self.future_horizon, 1, 1, 3, dtype=torch.float32)
+        future_conf = torch.zeros(self.future_horizon, 1, 1, dtype=torch.float32)
+        future_mask = torch.zeros(self.future_horizon, dtype=torch.bool)
 
         # ========== 6. 构建返回字典 ==========
-        prompt = item["prompt"] if item["prompt"] is not None else ""
+        prompt = item["prompt"]
         
         return {
             # 原有字段

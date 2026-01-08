@@ -12,7 +12,7 @@ import random
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 os.environ["MUJOCO_GL"] = "osmes"
-
+#os.environ["MUJOCO_GL"] = "egl"
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [0.0]
 
 
@@ -21,12 +21,14 @@ class Args():
     horizon = 14
     max_steps = [25,25, 25, 95] 
     SERVER_URL = "ws://0.0.0.0:9000"
-    ckpt_name = f"Evo1_cut3r_libero_all"  
+    ckpt_name = f"Evo1_full_cut3r_libero_all"  
     task_suites = ["libero_spatial", "libero_object", "libero_goal", "libero_10"] 
     log_file = f"./log_file/{ckpt_name}.txt"
     num_episodes = 10
     SEED = 42
-    
+    ping_interval = 60  # 每 60 秒发送一次 ping（默认是 20 秒）
+    ping_timeout = 60   # 等待 pong 的超时时间（默认是 20 秒）
+    close_timeout = 30  # 关闭连接的超时时间    
     
 
 args = Args()
@@ -119,7 +121,12 @@ async def run(SERVER_URL: str, max_steps: int = None, num_episodes: int = None, 
     total_episodes = 0
     total_steps = 0
 
-    async with websockets.connect(SERVER_URL) as ws:
+    async with websockets.connect(
+        SERVER_URL,
+        ping_interval=args.ping_interval,
+        ping_timeout=args.ping_timeout,
+        close_timeout=args.close_timeout
+    ) as ws:
         log.info(f"===========================Start task suite {task_suite_name}========================")
 
         for task_id in range(num_tasks_in_suite):
@@ -155,7 +162,8 @@ async def run(SERVER_URL: str, max_steps: int = None, num_episodes: int = None, 
                 reset_data = obs_to_json_dict(obs, prompt, reset=True)
                 await ws.send(json.dumps(reset_data))
                 print(f"[Episode {ep+1}] Sent RESET signal")
-                
+                result= await ws.recv()
+                print("Received reset signal")
                 # 等待服务器确认（可选，但建议加上）
                 #_ = await ws.recv()
                 #print(f"[Episode {ep+1}] Reset complete, action discarded")

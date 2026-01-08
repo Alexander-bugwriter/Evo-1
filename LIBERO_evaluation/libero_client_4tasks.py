@@ -18,7 +18,7 @@ LIBERO_DUMMY_ACTION = [0.0] * 6 + [0.0]
 
 ######################################
 class Args():
-    horizon = 14
+    horizon = 10
     max_steps = [25,25, 25, 95] 
     SERVER_URL = "ws://0.0.0.0:9000"
     ckpt_name = f"Evo1_libero_all"  

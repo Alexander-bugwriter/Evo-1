@@ -6,7 +6,7 @@ from typing import List, Optional, Union, Tuple
 from PIL import Image
 import torch
 import torch.nn as nn
-from model.internvl3.internvl3_embedder_cut3r import InternVL3Embedder
+from model.internvl3.internvl3_full_embedder_cut3r import InternVL3Embedder
 from model.action_head.flow_matching import FlowmatchingActionHead
 import logging
 from scripts.cut3r_encoder_lyh import prepare_input
@@ -98,7 +98,6 @@ class EVO1(nn.Module):
         self.fusion_block.to(device=self._device, dtype=torch.bfloat16)
         print(f"✅ Initialized CrossAttentionFusion")
         self.embedder = InternVL3Embedder(model_name=vlm_name, device=self._device,fusion_block=self.fusion_block)
-        #self.embedder = InternVL3Embedder(model_name=vlm_name, device=self._device,fusion_block=None)
 
         action_head_type = config.get("action_head", "flowmatching").lower()
         
@@ -299,10 +298,20 @@ class EVO1(nn.Module):
         #for param in self.embedder.model.vision_model.parameters():
         #    param.requires_grad = False
         #print("Frozen VIT (vision_model)") 
-        if not config.get("finetune_vlm", False):
-            self._freeze_module(self.embedder, "VLM (InternVL3)")
+        
+        #if not config.get("finetune_vlm", False):
+        #    self._freeze_module(self.embedder, "VLM (InternVL3)")
+        #else:
+        #    print("Finetuning VLM (InternVL3)...")
+        if not config.get("finetune_vit", False):
+            self._freeze_module(self.embedder.model.vision_model, "VIT (vision_model)")
         else:
-            print("Finetuning VLM (InternVL3)...")
+            print("Finetuning VIT (vision_model)...")
+            
+        if not config.get("finetune_llm_backbone", False):
+            self._freeze_module(self.embedder.model.language_model, "LLM Backbone")
+        else:
+            print("Finetuning LLM Backbone...")
 
         if not config.get("finetune_action_head", False):
             self._freeze_module(self.action_head, "Action Head")
@@ -311,9 +320,6 @@ class EVO1(nn.Module):
 
         
         if not config.get("finetune_fusion_block", False):
-            try:
-                self._freeze_module(self.fusion_block, "Fusion Block")
-            except:
-                print("No_fusion_block")
+            self._freeze_module(self.fusion_block, "Fusion Block")
         else:
             print("Finetuning Fusion Block...")

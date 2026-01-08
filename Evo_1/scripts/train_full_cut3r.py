@@ -11,7 +11,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from torch.optim.lr_scheduler import LambdaLR
-from Evo1_cut3r import EVO1
+from Evo1_full_cut3r import EVO1
 from accelerate import Accelerator 
 import logging
 from datetime import datetime
@@ -262,7 +262,7 @@ def load_checkpoint_with_deepspeed(model_engine, load_dir, accelerator, tag="ste
         load_path, client_state = model_engine.load_checkpoint(
             load_dir,
             tag=tag,
-            load_module_strict=True,
+            load_module_strict=False,
             load_optimizer_states=load_optimizer_states and not resume_pretrain,
             load_lr_scheduler_states=load_optimizer_states and not resume_pretrain
         )
@@ -278,7 +278,7 @@ def load_checkpoint_with_deepspeed(model_engine, load_dir, accelerator, tag="ste
             load_path, client_state = model_engine.load_checkpoint(
                 load_dir,
                 tag=tag,
-                load_module_strict=True,
+                load_module_strict=False,
                 load_optimizer_states=False,
                 load_lr_scheduler_states=False
             )
@@ -354,7 +354,7 @@ def train(config):
     config["training"] = True  # 🔥 新增
     model = EVO1(config)
     model.train()
-    model.set_finetune_flags()
+    #model.set_finetune_flags()
 
     lr = get_with_warning(config, "lr", 1e-5)
     wd = get_with_warning(config, "weight_decay", 1e-5)
@@ -365,7 +365,7 @@ def train(config):
 
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
     model_engine = model  
-  
+    
     if accelerator.is_main_process:
         logging.info("Initialized with Accelerate")
     
@@ -410,8 +410,12 @@ def train(config):
         best_loss = client_state.get("best_loss", float("inf"))
         if accelerator.is_main_process:
             logging.info(f"Resuming from {resume_dir}/{resume_tag}, step {step}")
+        # 🔥 加这两行
+        unwrapped_model = accelerator.unwrap_model(model)
+        unwrapped_model.set_finetune_flags()
     else:
         step = 0
+        model.set_finetune_flags()
         if accelerator.is_main_process:
             logging.info("Starting fresh training")
 
@@ -596,7 +600,9 @@ if __name__ == "__main__":
    
 
     # Finetuning
-    parser.add_argument("--finetune_vlm", action="store_true")
+    #parser.add_argument("--finetune_vlm", action="store_true")
+    parser.add_argument("--finetune_vit", action="store_true")
+    parser.add_argument("--finetune_llm_backbone", action="store_true")
     parser.add_argument("--finetune_action_head", action="store_true")
     parser.add_argument("--finetune_fusion_block", action="store_true")  # 🔥 新增
     
