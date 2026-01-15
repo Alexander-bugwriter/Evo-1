@@ -172,7 +172,8 @@ if __name__ == "__main__":
     #Example: ckpt_dir = "/home/dell/checkpoints/Evo1/Evo1_MetaWorld/"
     
     #ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/lyh_train_cut3r_stage_2/step_best"
-    ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/Evo1_cut3r_full_0115_stage3/step_best"
+    #ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/Evo1_cut3r_full_frozenVIT_stage2_1228/step_200000"
+    ckpt_dir = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Evo1/Evo1_cut3r_full_0115_stage3/step_80000"
     port = 9000
 
     print("Loading EVO_1 model...")

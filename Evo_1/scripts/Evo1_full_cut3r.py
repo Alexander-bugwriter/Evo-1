@@ -149,15 +149,15 @@ class EVO1(nn.Module):
     """
         if self.cut3r_encoder is None:
             raise RuntimeError("CUT3R encoder not initialized. Set training=False in config.")
-        #print(f"\n[DEBUG] Input images info:")
+        print(f"\n[DEBUG] Input images info:")
         #for idx, img in enumerate(images):
-            #if isinstance(img, Image.Image):
-                #print(f"  Image {idx}: PIL.Image, size={img.size}, mode={img.mode}")
-            #elif isinstance(img, torch.Tensor):
-                #print(f"  Image {idx}: Tensor, shape={img.shape}, dtype={img.dtype}, "
-                    #f"range=[{img.min().item():.3f}, {img.max().item():.3f}]")
-            #else:
-                #print(f"  Image {idx}: {type(img)}")
+        #    if isinstance(img, Image.Image):
+        #        print(f"  Image {idx}: PIL.Image, size={img.size}, mode={img.mode}")
+        #    elif isinstance(img, torch.Tensor):
+        #        print(f"  Image {idx}: Tensor, shape={img.shape}, dtype={img.dtype}, "
+        #            f"range=[{img.min().item():.3f}, {img.max().item():.3f}]")
+        #    else:
+        #        print(f"  Image {idx}: {type(img)}")
         # ========== 1. 图像预处理 ==========
         processed = []
         for img in images:
