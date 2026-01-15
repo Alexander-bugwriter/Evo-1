@@ -299,10 +299,21 @@ class EVO1(nn.Module):
         #for param in self.embedder.model.vision_model.parameters():
         #    param.requires_grad = False
         #print("Frozen VIT (vision_model)") 
-        if not config.get("finetune_vlm", False):
-            self._freeze_module(self.embedder, "VLM (InternVL3)")
+        #if not config.get("finetune_vlm", False):
+        #    self._freeze_module(self.embedder, "VLM (InternVL3)")
+        #else:
+        #    print("Finetuning VLM (InternVL3)...")
+        
+         if not config.get("finetune_vit", False):
+            self._freeze_module(self.embedder.model.vision_model, "VIT (vision_model)")
         else:
-            print("Finetuning VLM (InternVL3)...")
+            print("Finetuning VIT (vision_model)...")
+            
+        if not config.get("finetune_llm_backbone", False):
+            self._freeze_module(self.embedder.model.language_model, "LLM Backbone")
+        else:
+            print("Finetuning LLM Backbone...")
+
 
         if not config.get("finetune_action_head", False):
             self._freeze_module(self.action_head, "Action Head")

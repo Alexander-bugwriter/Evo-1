@@ -596,7 +596,9 @@ if __name__ == "__main__":
    
 
     # Finetuning
-    parser.add_argument("--finetune_vlm", action="store_true")
+    #parser.add_argument("--finetune_vlm", action="store_true")
+    parser.add_argument("--finetune_vit", action="store_true")
+    parser.add_argument("--finetune_llm_backbone", action="store_true")
     parser.add_argument("--finetune_action_head", action="store_true")
     parser.add_argument("--finetune_fusion_block", action="store_true")  # 🔥 新增
     
