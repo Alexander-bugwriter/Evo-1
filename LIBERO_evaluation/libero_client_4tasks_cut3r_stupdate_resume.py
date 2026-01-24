@@ -17,12 +17,15 @@ LIBERO_DUMMY_ACTION = [0.0] * 6 + [0.0]
 
 import argparse  # 添加到 imports
 import datetime
-
+import re
 # 在 Args 类定义之前添加
 parser = argparse.ArgumentParser()
 parser.add_argument('--ckpt_name', type=str, 
                     default=f"Evo1_cut3r_libero_all",
                     help='Checkpoint name for logs and videos')
+parser.add_argument('--cut3r_update_interval',type=int,
+                    default=1,
+                    help='cut3r_state_update_interval')
 cmd_args = parser.parse_args()
 ######################################
 class Args():
@@ -38,7 +41,7 @@ class Args():
     ping_interval = 60  # 每 60 秒发送一次 ping（默认是 20 秒）
     ping_timeout = 60   # 等待 pong 的超时时间（默认是 20 秒）
     close_timeout = 30  # 关闭连接的超时时间    
-    
+    UPDATE_INTERVAL = cmd_args.cut3r_update_interval
 
 args = Args()
 
@@ -58,6 +61,70 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+def parse_last_completed(log_file):
+    if not os.path.exists(log_file):
+        return None, 0, -1, 0, 0, 0
+    
+    with open(log_file, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    
+    last_suite = None
+    last_task = None
+    last_episode = -1
+    suite_start_idx = -1
+    task_start_idx = -1
+    
+    # 从后往前找
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i]
+        
+        # 1. 找最后完成的 episode
+        if last_episode == -1:
+            match = re.search(r'Task (\d+) \| Episode (\d+): [✅❌]', line)
+            if match:
+                last_task = int(match.group(1))
+                last_episode = int(match.group(2)) - 1
+        
+        # 2. 找最后的 task 开始位置
+        if task_start_idx == -1 and last_task is not None:
+            match = re.search(r'Start task(\d+):', line)
+            if match and int(match.group(1)) - 1 == last_task:
+                task_start_idx = i
+        
+        # 3. 找最后的 suite 开始位置
+        if suite_start_idx == -1:
+            match = re.search(r'Start task suite (\w+)', line)
+            if match:
+                last_suite = match.group(1)
+                suite_start_idx = i
+                break
+    
+    # 统计 suite 级别（从 suite 开始到现在）
+    suite_success = 0
+    suite_episodes = 0
+    if suite_start_idx != -1:
+        for line in lines[suite_start_idx:]:
+            match = re.search(r'Task \d+ \| Episode \d+: ([✅❌])', line)
+            if match:
+                suite_episodes += 1
+                if '✅' in match.group(1):
+                    suite_success += 1
+    
+    # 统计 task 级别（从当前 task 开始到现在）
+    task_success = 0
+    if task_start_idx != -1:
+        for line in lines[task_start_idx:]:
+            match = re.search(r'Task \d+ \| Episode \d+: ([✅❌])', line)
+            if match:
+                if '✅' in match.group(1):
+                    task_success += 1
+    
+    return (last_suite, 
+            last_task if last_task is not None else 0, 
+            last_episode,
+            suite_success, suite_episodes, 
+            task_success)
+
 # ========= Photos to list[list[list[int]]] =========
 def encode_image_array(img_array: np.ndarray):
     return img_array.astype(np.uint8).tolist()
@@ -72,6 +139,27 @@ def quat2axisangle(quat):
     if math.isclose(den, 0.0):
         return np.zeros(3)
     return (quat[:3] * 2.0 * math.acos(quat[3])) / den
+
+
+# ========= 🔥 新增：简化的状态更新数据包（只包含图像） =========
+def obs_to_update_dict(obs, resize_size=448):
+    """
+    仅用于更新CUT3R状态的最小数据包
+    只包含3个相机的图像数据
+    """
+    img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+    wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+    dummy_proc = np.zeros((resize_size, resize_size, 3), dtype=np.uint8)
+    
+    data = {
+        "update_only": True,  # 标记这是状态更新请求
+        "image": [
+            encode_image_array(img),
+            encode_image_array(wrist_img),
+            encode_image_array(dummy_proc)
+        ],
+    }
+    return data
 
 # ========= Observation to JSON-compatible dict =========
 def obs_to_json_dict(obs, prompt, resize_size=448,reset=False):
@@ -119,15 +207,19 @@ def save_video(frames, filename="simulation.mp4", fps=20, save_dir="videos_2"):
         log.warning(f"⚠️ No frames to save. File not created: {filepath}")
 
 # ========= Main Function =========
-async def run(SERVER_URL: str, max_steps: int = None, num_episodes: int = None, horizon = None, task_suite_name = None):
+# async def run(SERVER_URL: str, max_steps: int = None, num_episodes: int = None, horizon = None, task_suite_name = None):
+async def run(SERVER_URL: str, max_steps: int = None, num_episodes: int = None, horizon = None, cut3r_update_interval=1,task_suite_name = None, start_task_id=0, start_episode=0, prev_suite_success=0, prev_suite_episodes=0, prev_task_success=0):
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[task_suite_name]()
     num_tasks_in_suite = task_suite.n_tasks
 
     print(f"Numbers of tasks: {num_tasks_in_suite}")
 
-    total_success = 0
-    total_episodes = 0
+    # total_success = 0
+    # total_episodes = 0
+    # total_steps = 0
+    total_success = prev_suite_success  # 恢复 suite 统计
+    total_episodes = prev_suite_episodes
     total_steps = 0
 
     async with websockets.connect(
@@ -139,7 +231,13 @@ async def run(SERVER_URL: str, max_steps: int = None, num_episodes: int = None, 
         log.info(f"===========================Start task suite {task_suite_name}========================")
 
         for task_id in range(num_tasks_in_suite):
-
+            if task_id < start_task_id:
+                continue
+            # 如果是恢复的 task，继承之前的 task_success
+            if task_id == start_task_id:
+                task_success = prev_task_success
+            else:
+                task_success = 0
             print(f"task_id{task_id}")
             #if task_id+1 not in [1,5,7,9] :
              #   continue
@@ -150,10 +248,21 @@ async def run(SERVER_URL: str, max_steps: int = None, num_episodes: int = None, 
 
             log.info(f"\n========= Start task{task_id+1}: {task_description} =========")
 
-            task_success = 0
+            #task_success = 0
             task_episodes = min(num_episodes, len(initial_states))
+            # 计算从哪个 episode 开始
+            ep_start = start_episode + 1 if task_id == start_task_id else 0
+            
+            # 🔥 如果这个 task 已经完成，跳过
+            if ep_start >= task_episodes:
+                log.info(f"⏭️  Task {task_id} already completed, skipping")
+                continue            
+            # 🔥 初始化 task_success（注意：删掉原来那行 task_success = 0）
+            task_success = prev_task_success if task_id == start_task_id else 0
 
-            for ep in range(task_episodes):
+            # for ep in range(task_episodes):
+            #ep_start = start_episode + 1 if task_id == start_task_id else 0  # 从完成的下一个开始
+            for ep in range(ep_start, task_episodes):
                 print(f"\n===== Task {task_id} | Episode {ep+1} =====")
 
                 env.reset()
@@ -177,7 +286,7 @@ async def run(SERVER_URL: str, max_steps: int = None, num_episodes: int = None, 
                 #_ = await ws.recv()
                 #print(f"[Episode {ep+1}] Reset complete, action discarded")
 
-                #print(prompt)
+                print(prompt)
                 episode_done = False
                 max_step = 0
                 frames = []
@@ -217,12 +326,20 @@ async def run(SERVER_URL: str, max_steps: int = None, num_episodes: int = None, 
                             episode_done = False
                             break
 
-                        
                         frame = np.hstack([
                             np.rot90(obs["agentview_image"], 2),
                             np.rot90(obs["robot0_eye_in_hand_image"], 2)
                         ])
                         frames.append(frame)
+
+                        if i < horizon - 1 and( i+1) % cut3r_update_interval == 0:  # 不是最后一个action
+                            update_data = obs_to_update_dict(obs)
+                            await ws.send(json.dumps(update_data))
+                            #print(f"[Step {step}, Action {i+1}/{horizon}] Sent state update (images only)")
+                            
+                            update_result = await ws.recv()
+                            update_response = json.loads(update_result)
+                            #print(f"[Step {step}, Action {i+1}/{horizon}] Received: {update_response.get('status', 'unknown')}")
 
                         #print(f"[Step {step}] reward={reward:.2f}, done={done}")
                         if done:
@@ -257,13 +374,47 @@ async def run(SERVER_URL: str, max_steps: int = None, num_episodes: int = None, 
 
 
 
+# if __name__ == "__main__":
+#     np.random.seed(args.SEED)
+#     random.seed(args.SEED)
+    
+#     for name, max_steps in zip(args.task_suites, args.max_steps):
+#         asyncio.run(run(SERVER_URL = args.SERVER_URL,
+#                         max_steps=max_steps, 
+#                         num_episodes=args.num_episodes,
+#                         horizon=args.horizon,
+#                         task_suite_name=name))
 if __name__ == "__main__":
     np.random.seed(args.SEED)
     random.seed(args.SEED)
     
+    # 解析上次运行位置
+    resume_suite, resume_task, resume_episode, suite_succ, suite_eps, task_succ = parse_last_completed(args.log_file)
+
+    if resume_suite:
+        log.info(f"🔄 Resume: {resume_suite} task{resume_task} ep{resume_episode+1}")
+        log.info(f"📊 Suite: {suite_succ}/{suite_eps}, Task: {task_succ}")
+    suite_started = (resume_suite is None)
+    
     for name, max_steps in zip(args.task_suites, args.max_steps):
+        # 跳过已完成的 suite
+        if not suite_started:
+            if name == resume_suite:
+                suite_started = True
+            else:
+                continue
+        
+        # 传入起始位置
+        start_task = resume_task if name == resume_suite else 0
+        start_ep = resume_episode if name == resume_suite else -1
+        ps = suite_succ if name == resume_suite else 0
+        pe = suite_eps if name == resume_suite else 0
+        ts = task_succ if name == resume_suite else 0
         asyncio.run(run(SERVER_URL = args.SERVER_URL,
                         max_steps=max_steps, 
                         num_episodes=args.num_episodes,
                         horizon=args.horizon,
-                        task_suite_name=name))
+                        cut3r_update_interval=args.UPDATE_INTERVAL,
+                        task_suite_name=name,
+                        start_task_id=start_task,
+                        start_episode=start_ep, prev_suite_success=ps, prev_suite_episodes=pe, prev_task_success=ts))

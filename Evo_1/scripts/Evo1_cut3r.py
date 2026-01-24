@@ -304,7 +304,7 @@ class EVO1(nn.Module):
         #else:
         #    print("Finetuning VLM (InternVL3)...")
         
-         if not config.get("finetune_vit", False):
+        if not config.get("finetune_vit", False):
             self._freeze_module(self.embedder.model.vision_model, "VIT (vision_model)")
         else:
             print("Finetuning VIT (vision_model)...")

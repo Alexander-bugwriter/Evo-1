@@ -149,7 +149,7 @@ class EVO1(nn.Module):
     """
         if self.cut3r_encoder is None:
             raise RuntimeError("CUT3R encoder not initialized. Set training=False in config.")
-        print(f"\n[DEBUG] Input images info:")
+        #print(f"\n[DEBUG] Input images info:")
         #for idx, img in enumerate(images):
         #    if isinstance(img, Image.Image):
         #        print(f"  Image {idx}: PIL.Image, size={img.size}, mode={img.mode}")

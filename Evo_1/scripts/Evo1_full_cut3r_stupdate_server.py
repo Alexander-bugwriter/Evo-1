@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 from torchvision import transforms
 from fvcore.nn import FlopCountAnalysis
-
+import time
 
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -152,16 +152,47 @@ def infer_from_json_dict(data: dict, model, normalizer):
         action = normalizer.denormalize_action(action[0])
         return action.cpu().numpy().tolist()
 
+def handle_state_update_request(data: dict):
+    #print("🔄 STATE UPDATE: Calling CUT3R...", end=" ", flush=True)
+    #start_time = time.time()
+    
+    # 解码图像
+    images = [decode_image_from_list(img) for img in data["image"]]
+    #print("\nDecoded images (before CUT3R):")
+    #for i, img in enumerate(images):
+    #    print(f"    Image {i}: shape={img.shape}, range=[{img.min().item():.4f}, {img.max().item():.4f}]")
+                
+    # 🔥 调用 _extract_spatial_features 更新CUT3R状态
+    with torch.no_grad(), torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+        spatial_tokens = model._extract_spatial_features(images)
+        
+    #elapsed = (time.time() - start_time) * 1000  # ms
+        
+    #print(f"✅ Done in {elapsed:.1f}ms")
+    #print(f"  - Spatial tokens shape: {spatial_tokens.shape}")
+    #print(f"  - dtype: {spatial_tokens.dtype}")
+        
+    return {"status": "state_updated"}
+        
 
 async def handle_request(websocket, model, normalizer):
-    print("Client connected")
+    print("✅ Client connected")
     try:
         async for message in websocket:
             json_data = json.loads(message)
-            print(f"Received JSON observation")
-            actions = infer_from_json_dict(json_data, model, normalizer)
-            await websocket.send(json.dumps(actions))
-            print("Sent action chunk")
+            
+            # 🔥 检查是否只需要更新状态
+            if json_data.get("update_only", False):
+                print("[STATE UPDATE MODE]")
+                result = handle_state_update_request(json_data)
+                await websocket.send(json.dumps(result))
+                print("Sent confirmation: state_updated\n")
+            else:
+                # 完整推理
+                print("[FULL INFERENCE MODE]")
+                actions = infer_from_json_dict(json_data, model, normalizer)
+                await websocket.send(json.dumps(actions))
+                print(f"Sent action chunk ({len(actions)} actions)\n")
     except websockets.exceptions.ConnectionClosed:
         print("Client disconnected.")
  

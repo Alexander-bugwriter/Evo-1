@@ -26,7 +26,7 @@ parser.add_argument('--ckpt_name', type=str,
 cmd_args = parser.parse_args()
 ######################################
 class Args():
-    horizon = 14
+    horizon = 8
     max_steps = [25,25, 25, 95] 
     SERVER_URL = "ws://0.0.0.0:9000"
     #ckpt_name = f"Evo1_full_cut3r_libero_all"  
