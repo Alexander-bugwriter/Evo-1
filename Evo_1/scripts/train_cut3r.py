@@ -74,8 +74,6 @@ def custom_collate_fn(batch):
     state_mask = torch.stack([item["state_mask"] for item in batch], dim=0)
     embodiment_ids = torch.stack([item["embodiment_id"] for item in batch], dim=0)
 
-    spatial_tokens = torch.stack([item["spatial_tokens"] for item in batch], dim=0)
-
     return {
         "prompts": prompts,
         "images": images,
@@ -85,7 +83,6 @@ def custom_collate_fn(batch):
         "state_mask": state_mask,
         "image_masks": image_masks,
         "embodiment_ids": embodiment_ids,
-        "spatial_tokens": spatial_tokens  # 🔥 新增
     }
 
 def get_lr_lambda(warmup_steps, total_steps, resume_step=0):
@@ -150,7 +147,7 @@ def prepare_dataset(config: dict) -> torch.utils.data.Dataset:
     binarize_gripper = get_with_warning(config, "binarize_gripper", False)
     use_augmentation = get_with_warning(config, "use_augmentation", False)
     if dataset_type == "lerobot":
-        from dataset.lerobot_dataset_cut3r import LeRobotDatasetCUT3R
+        from dataset.lerobot_dataset_cut3r_multiframe import LeRobotDatasetCUT3R
         import yaml
         with open(config.get("dataset_config_path"), 'r') as f:
             dataset_config = yaml.safe_load(f)
@@ -162,7 +159,6 @@ def prepare_dataset(config: dict) -> torch.utils.data.Dataset:
             action_horizon=horizon,
             binarize_gripper=binarize_gripper,
             use_augmentation=use_augmentation,
-            future_horizon=1,
         )
     else:
         raise ValueError(f"Unknown dataset_type: {dataset_type}")
@@ -444,24 +440,18 @@ def train(config):
             state_mask = batch["state_mask"]
             embodiment_ids = batch["embodiment_ids"]
             fused_tokens_list = []
-            spatial_tokens_batch = batch["spatial_tokens"]  # 🔥 新增
-            
             
             # for prompt, images, image_mask in zip(prompts, images_batch, image_masks):
             #     fused = model.get_vl_embeddings(images=images, image_mask=image_mask, prompt=prompt, return_cls_only=False)
             #     fused_tokens_list.append(fused.to(dtype=torch.bfloat16))
             for i, (prompt, images, image_mask) in enumerate(zip(prompts, images_batch, image_masks)):
                 # 取出当前样本的 spatial_tokens
-                spatial_tokens = None
-                if spatial_tokens_batch is not None:
-                    spatial_tokens = spatial_tokens_batch[i]  # [N, 730, 768]
                 
                 fused = model.get_vl_embeddings(
                     images=images, 
                     image_mask=image_mask, 
                     prompt=prompt, 
                     return_cls_only=False,
-                    spatial_tokens=spatial_tokens  # 🔥 传入
                 )
                 fused_tokens_list.append(fused.to(dtype=torch.bfloat16))
 
@@ -601,6 +591,7 @@ if __name__ == "__main__":
     parser.add_argument("--finetune_llm_backbone", action="store_true")
     parser.add_argument("--finetune_action_head", action="store_true")
     parser.add_argument("--finetune_fusion_block", action="store_true")  # 🔥 新增
+    parser.add_argument("--finetune_cut3r", action="store_true")
     
     # 🔥 CUT3R 相关
     parser.add_argument("--use_cut3r", action="store_true")

@@ -150,134 +150,243 @@ class InternVL3Embedder(nn.Module):
 
         return prompt
     
+    # def _prepare_and_fuse_embeddings(
+    #     self,
+    #     prompt: str,
+    #     vit_embeds: torch.Tensor,
+    #     image_mask: torch.Tensor,
+    #     num_tiles_list: List[int]
+    # ) -> (torch.Tensor, torch.Tensor):
+   
+    #     untruncated_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
+    #     true_sequence_length = untruncated_ids.shape[1]
+
+    #     if true_sequence_length > self.max_text_length:
+    #         print("\n" + "="*80)
+    #         print(f" WARNING: Input prompt was TRUNCATED!")
+    #         print(f"   - Max Length Allowed    : {self.max_text_length}")
+    #         print(f"   - Actual Length      : {true_sequence_length}")
+    #         print(f"   - Truncated Prompt (first 100 chars): '{prompt[:100]}...'")
+    #         print("="*80 + "\n")
+
+    #     model_inputs = self.tokenizer(prompt, return_tensors="pt", padding='max_length', truncation=True, max_length=self.max_text_length).to(self.device)
+    #     input_ids = model_inputs["input_ids"]
+    #     attention_mask = model_inputs["attention_mask"]
+
+       
+    #     img_token_mask = (input_ids == self.img_context_token_id)
+     
+    #     img_token_locations = torch.where(img_token_mask)[1]
+
+
+    #     input_embeds = self.model.language_model.get_input_embeddings()(input_ids).clone()
+
+    #     B, N, C = input_embeds.shape
+    #     input_embeds = input_embeds.reshape(B * N, C)
+    #     input_ids = input_ids.reshape(B * N)
+
+    #     selected = (input_ids == self.img_context_token_id)
+
+            
+    #     try:
+    #         input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C)
+    #         ignore_flag = False
+    #     except Exception as e:
+    #         vit_embeds = vit_embeds.reshape(-1, C)
+    #         print(f'warning: {e}, input_embeds[selected].shape={input_embeds[selected].shape}, '
+    #               f'vit_embeds.shape={vit_embeds.shape}')
+    #         n_token = selected.sum()
+    #         input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds[:n_token]
+    #         ignore_flag = True
+
+ 
+    #     tokens_per_tile = self.model.num_image_token 
+ 
+    #     torch.set_printoptions(profile="full", threshold=float('inf'))
+   
+    #     torch.set_printoptions(profile="default")
+    #     current_token_idx = 0
+    #     for i in range(len(image_mask)):
+           
+    #         num_tiles_for_this_image = num_tiles_list[i]
+    #         num_tokens_for_this_image = num_tiles_for_this_image * tokens_per_tile
+       
+    #         if not image_mask[i]:
+                
+    #             start_idx = img_token_locations[current_token_idx]
+    #             end_idx = start_idx + num_tokens_for_this_image
+               
+    #             attention_mask[0, start_idx:end_idx] = 0
+    
+    #         current_token_idx += num_tokens_for_this_image
+
+    #     input_embeds = input_embeds.reshape(B, N, C)
+    
+    #     torch.set_printoptions(profile="full", threshold=float('inf'))
+     
+    #     torch.set_printoptions(profile="default")
+    #     return input_embeds, attention_mask
     def _prepare_and_fuse_embeddings(
         self,
         prompt: str,
-        vit_embeds: torch.Tensor,
-        image_mask: torch.Tensor,
-        num_tiles_list: List[int]
+        vit_embeds: torch.Tensor,    # [12*256, C] (假设12张图，每张256个token)
+        image_mask: torch.Tensor,    # [12] (bool张量)
+        num_tiles_list: List[int]    # [1, 1, ..., 1] (长度为12)
     ) -> (torch.Tensor, torch.Tensor):
-   
-        untruncated_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
-        true_sequence_length = untruncated_ids.shape[1]
+        
+        # 1. 文本处理 (单样本模式)
+        model_inputs = self.tokenizer(
+            prompt, 
+            return_tensors="pt", 
+            padding='max_length', 
+            truncation=True, 
+            max_length=self.max_text_length
+        ).to(self.device)
+        
+        input_ids = model_inputs["input_ids"]          # [1, L]
+        attention_mask = model_inputs["attention_mask"]    # [1, L]
 
-        if true_sequence_length > self.max_text_length:
-            print("\n" + "="*80)
-            print(f" WARNING: Input prompt was TRUNCATED!")
-            print(f"   - Max Length Allowed    : {self.max_text_length}")
-            print(f"   - Actual Length      : {true_sequence_length}")
-            print(f"   - Truncated Prompt (first 100 chars): '{prompt[:100]}...'")
-            print("="*80 + "\n")
-
-        model_inputs = self.tokenizer(prompt, return_tensors="pt", padding='max_length', truncation=True, max_length=self.max_text_length).to(self.device)
-        input_ids = model_inputs["input_ids"]
-        attention_mask = model_inputs["attention_mask"]
-
-       
-        img_token_mask = (input_ids == self.img_context_token_id)
-     
-        img_token_locations = torch.where(img_token_mask)[1]
-
-
+        # 2. 获取 Embedding 并克隆
         input_embeds = self.model.language_model.get_input_embeddings()(input_ids).clone()
+        
+        # 3. 填充视觉特征 (核心一步：利用布尔掩码直接覆盖)
+        # img_token_mask 是 [1, L] 的布尔矩阵
+        img_token_mask = (input_ids == self.img_context_token_id) 
+        
+        # vit_embeds.view(-1, C) 形状必须等于 img_token_mask 中 True 的数量
+        # 这种写法比 reshape(B*N, C) 更安全，因为它不改变原始 input_embeds 的物理排布
+        input_embeds[img_token_mask] = vit_embeds.view(-1, input_embeds.shape[-1])
 
-        B, N, C = input_embeds.shape
-        input_embeds = input_embeds.reshape(B * N, C)
-        input_ids = input_ids.reshape(B * N)
+        # 4. 精准处理 12 张图的 Attention Mask
+        # 获取所有图片 token 在序列中的物理列索引 (长度为 12 * 256)
+        img_token_locations = torch.where(img_token_mask)[1]
+        
+        tokens_per_tile = self.model.num_image_token # 256
+        current_token_ptr = 0 # 记录在 img_token_locations 里的偏移
 
-        selected = (input_ids == self.img_context_token_id)
-
-            
-        try:
-            input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C)
-            ignore_flag = False
-        except Exception as e:
-            vit_embeds = vit_embeds.reshape(-1, C)
-            print(f'warning: {e}, input_embeds[selected].shape={input_embeds[selected].shape}, '
-                  f'vit_embeds.shape={vit_embeds.shape}')
-            n_token = selected.sum()
-            input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds[:n_token]
-            ignore_flag = True
-
- 
-        tokens_per_tile = self.model.num_image_token 
- 
-        torch.set_printoptions(profile="full", threshold=float('inf'))
-   
-        torch.set_printoptions(profile="default")
-        current_token_idx = 0
         for i in range(len(image_mask)):
-           
-            num_tiles_for_this_image = num_tiles_list[i]
-            num_tokens_for_this_image = num_tiles_for_this_image * tokens_per_tile
-       
+            # 获取第 i 张图占据的 token 长度
+            num_tokens = num_tiles_list[i] * tokens_per_tile
+            
+            # 如果 dataset 标记该图无效 (False)
             if not image_mask[i]:
+                # 从第 i 张图的第一个 token 位置开始
+                start_in_seq = img_token_locations[current_token_ptr]
+                # 这里的逻辑是：既然是连续替换，结束位置就是起始位置坐标 + token 长度
+                end_in_seq = start_in_seq + num_tokens
                 
-                start_idx = img_token_locations[current_token_idx]
-                end_idx = start_idx + num_tokens_for_this_image
-               
-                attention_mask[0, start_idx:end_idx] = 0
-    
-            current_token_idx += num_tokens_for_this_image
+                # 在 attention_mask 的第一行 (index 0) 屏蔽这一整张图
+                attention_mask[0, start_in_seq:end_in_seq] = 0
+                
+            # 指针跳过当前图的 token 数量，指向下一张图的起始索引
+            current_token_ptr += num_tokens
 
-        input_embeds = input_embeds.reshape(B, N, C)
-    
-        torch.set_printoptions(profile="full", threshold=float('inf'))
-     
-        torch.set_printoptions(profile="default")
         return input_embeds, attention_mask
 
 
-    def get_fused_image_text_embedding_from_tensor_images(
-        self,
-        image_tensors: list[Union[Image.Image, torch.Tensor]],
-        image_mask: torch.Tensor,
-        text_prompt: str,
-        return_cls_only: bool = True,
-        spatial_tokens: Optional[torch.Tensor] = None  # 🔥 新增参数
-    ):
+    # def get_fused_image_text_embedding_from_tensor_images(
+    #     self,
+    #     image_tensors: list[Union[Image.Image, torch.Tensor]],# 传入 [B, F, V, C, H, W]
+    #     image_mask: torch.Tensor,# 传入 [B, F, V, C, H, W]
+    #     text_prompt: str,
+    #     return_cls_only: bool = True,
+    #     spatial_tokens: Optional[torch.Tensor] = None  # 🔥 新增参数# 传入 [B, F, V, C, H, W]
+    # ):
 
    
-        pixel_values, num_tiles_list = self._preprocess_images(image_tensors)
+    #     pixel_values, num_tiles_list = self._preprocess_images(image_tensors)
 
        
-        if pixel_values.shape[0] == 0:
+    #     if pixel_values.shape[0] == 0:
            
-            print("Warning: No valid images to process after masking.")
+    #         print("Warning: No valid images to process after masking.")
+    #     print("Debug:image_tensors_shape",image_tensors.shape)
+    #     vit_embeds = self.model.extract_feature(pixel_values)
+    #    # print(f"🔍 vit_embeds shape: {vit_embeds.shape}")  # 🔥 添加这行
+    #    # print(f"🔍 pixel_values shape: {pixel_values.shape}")
+    #    # print(f"🔍 num_tiles_list: {num_tiles_list}")
+    #     #print(f"[DEBUG] vit_embeds dtype: {vit_embeds.dtype}")
+    #     #print(f"[DEBUG] vit_embeds shape: {vit_embeds.shape}")
 
-        vit_embeds = self.model.extract_feature(pixel_values)
-       # print(f"🔍 vit_embeds shape: {vit_embeds.shape}")  # 🔥 添加这行
-       # print(f"🔍 pixel_values shape: {pixel_values.shape}")
-       # print(f"🔍 num_tiles_list: {num_tiles_list}")
-        #print(f"[DEBUG] vit_embeds dtype: {vit_embeds.dtype}")
-        #print(f"[DEBUG] vit_embeds shape: {vit_embeds.shape}")
-
-        # fused_embeds = vit_embeds  
-        if self.fusion_block is not None and spatial_tokens is not None:
-            # vit_embeds: [num_tiles, 3200]
-            # spatial_tokens: [N, 730, 768]
-            # 🔥 使用 fusion_block 进行融合
-            fused_embeds, _ = self.fusion_block(
-                clip_features=vit_embeds,  # [1, num_tiles, 3200]
-                spatial_encoder_features=spatial_tokens,  
-            )
-            fused_embeds = fused_embeds.squeeze(0)  # [num_tiles, D_vit]
+    #     # fused_embeds = vit_embeds  
+    #     if self.fusion_block is not None and spatial_tokens is not None:
             
-            #print(f"✅ Applied spatial fusion: {vit_embeds.shape} + {spatial_tokens.shape} -> {fused_embeds.shape}")
+    #         # spatial_tokens: [N, 730, 768]
+    #         # 🔥 使用 fusion_block 进行融合
+    #         fused_embeds, _ = self.fusion_block(
+    #             clip_features=vit_embeds,  # [3, 256, 896]
+    #             spatial_encoder_features=spatial_tokens,  
+    #         )
+    #         fused_embeds = fused_embeds.squeeze(0)  
+            
+    #         #print(f"✅ Applied spatial fusion: {vit_embeds.shape} + {spatial_tokens.shape} -> {fused_embeds.shape}")
+    #     else:
+    #         fused_embeds = vit_embeds
+    #    # print(f"[DEBUG] fused_embeds dtype: {fused_embeds.dtype}")
+    #     #print(f"[DEBUG] fused_embeds shape: {fused_embeds.shape}")
+    #     fused_embeds = fused_embeds.to(dtype=torch.bfloat16)
+    #     prompt = self._build_multimodal_prompt(num_tiles_list, text_prompt)
+    #     inputs_embeds, attention_mask = self._prepare_and_fuse_embeddings(prompt, fused_embeds, image_mask, num_tiles_list)
+
+    #     outputs = self.model.language_model(
+    #         inputs_embeds=inputs_embeds,
+    #         attention_mask=attention_mask,
+    #         output_hidden_states=True,
+    #         return_dict=True,
+    #     )
+    #     fused_hidden = outputs.hidden_states[-1].to(torch.float32)
+
+    #     return fused_hidden[:, 0, :] if return_cls_only else fused_hidden
+    def get_fused_image_text_embedding_from_tensor_images(
+        self,
+        image_tensors: torch.Tensor,       # [B, F, V, C, H, W]
+        image_mask: torch.Tensor,          # [B, F, V]
+        text_prompt: str,
+        return_cls_only: bool = True,
+        spatial_tokens: Optional[torch.Tensor] = None  # [B, F, V, 730, 768]
+    ):
+        # 1. 展平维度：将多帧多视角看作一整个图片序列
+        B, F, V, C, H, W = image_tensors.shape
+        num_imgs_per_sample = F * V  # 比如 12
+        
+        # 展平为 [B*12, C, H, W] 和 [B*12, 730, 768]
+        flat_images = image_tensors.view(-1, C, H, W)
+        flat_spatial = spatial_tokens.view(-1, 730, 768) if spatial_tokens is not None else None
+        
+        # 2. 提取特征并融合
+        # num_tiles_list 长度为 B*12
+        pixel_values, num_tiles_list = self._preprocess_images(flat_images)
+        vit_embeds = self.model.extract_feature(pixel_values) 
+
+        if self.fusion_block is not None and flat_spatial is not None:
+            fused_embeds, _ = self.fusion_block(
+                clip_features=vit_embeds,
+                spatial_encoder_features=flat_spatial,
+            )
         else:
             fused_embeds = vit_embeds
-       # print(f"[DEBUG] fused_embeds dtype: {fused_embeds.dtype}")
-        #print(f"[DEBUG] fused_embeds shape: {fused_embeds.shape}")
-        fused_embeds = fused_embeds.to(dtype=torch.bfloat16)
-        prompt = self._build_multimodal_prompt(num_tiles_list, text_prompt)
-        inputs_embeds, attention_mask = self._prepare_and_fuse_embeddings(prompt, fused_embeds, image_mask, num_tiles_list)
 
+        fused_embeds = fused_embeds.to(dtype=torch.bfloat16)
+
+        # 3. 构建 Prompt (12张图对应12个占位符)
+        # 只需要传前 num_imgs_per_sample (12) 个切片信息
+        prompt = self._build_multimodal_prompt(num_tiles_list[:num_imgs_per_sample], text_prompt)
+
+        # 4. 缝合 Embedding 并处理掩码
+        inputs_embeds, attention_mask = self._prepare_and_fuse_embeddings(
+            prompt=prompt,
+            vit_embeds=fused_embeds,
+            image_mask=image_mask.view(B, -1), # 展平为 [B, 12]
+            num_tiles_list=num_tiles_list
+        )
+
+        # 5. LLM 推理
         outputs = self.model.language_model(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             output_hidden_states=True,
             return_dict=True,
         )
+        
         fused_hidden = outputs.hidden_states[-1].to(torch.float32)
-
         return fused_hidden[:, 0, :] if return_cls_only else fused_hidden

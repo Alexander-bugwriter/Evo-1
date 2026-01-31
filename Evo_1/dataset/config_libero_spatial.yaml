@@ -36,23 +36,23 @@ data_groups:
         image_1: observation.images.image
         image_2: observation.images.wrist_image
 
-    libero_object_no_noops_1.0.0_lerobot:
-      path: /opt/liblibai-models/user-workspace2/dataset/IPEC-COMMUNITY/libero_object_no_noops_1.0.0_lerobot
-      view_map:
-        image_1: observation.images.image
-        image_2: observation.images.wrist_image
+        #libero_object_no_noops_1.0.0_lerobot:
+        #path: /opt/liblibai-models/user-workspace2/dataset/IPEC-COMMUNITY/libero_object_no_noops_1.0.0_lerobot
+        #view_map:
+        #image_1: observation.images.image
+        #image_2: observation.images.wrist_image
 
-    libero_goal_no_noops_1.0.0_lerobot:
-      path: /opt/liblibai-models/user-workspace2/dataset/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot
-      view_map:
-        image_1: observation.images.image
-        image_2: observation.images.wrist_image
+        #libero_goal_no_noops_1.0.0_lerobot:
+        #path: /opt/liblibai-models/user-workspace2/dataset/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot
+        #view_map:
+        #image_1: observation.images.image
+        #image_2: observation.images.wrist_image
 
-    libero_10_no_noops_1.0.0_lerobot:
-      path: /opt/liblibai-models/user-workspace2/dataset/IPEC-COMMUNITY/libero_10_no_noops_1.0.0_lerobot
-      view_map:
-        image_1: observation.images.image
-        image_2: observation.images.wrist_image
+        #libero_10_no_noops_1.0.0_lerobot:
+        #path: /opt/liblibai-models/user-workspace2/dataset/IPEC-COMMUNITY/libero_10_no_noops_1.0.0_lerobot
+        #view_map:
+        #image_1: observation.images.image
+        #image_2: observation.images.wrist_image
 
 
 

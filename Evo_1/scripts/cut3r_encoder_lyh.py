@@ -98,13 +98,10 @@ class CUT3REncoder:
             device: 设备
         """
         self.device = device
-
         # 加载模型
         print(f"Loading CUT3R from {model_path}")
         self.model = ARCroco3DStereo.from_pretrained(model_path).to(device)
-        self.model.eval()
         print("✅ Model loaded")
-
          # ========== 🔥 状态缓存 ==========
         self.cached_state_feat = None
         self.cached_state_pos = None
@@ -134,136 +131,109 @@ class CUT3REncoder:
             camera_tokens: [F*B, 1, 768]
             patch_tokens: [F*B, 729, 768]
         """
-        # with torch.no_grad():
-        #     # 使用官方 _forward_impl
-        #     results, _ = self.model._forward_impl(views, ret_state=False)
+        
+        camera_tokens_list = []
+        patch_tokens_list = []
+        ress = []  # 官方的结果列表
 
-        # 提取 camera 和 patch tokens（需要重新前向获取 dec）
-        # 由于官方方法不直接返回 dec，我们需要手动提取
-        with torch.no_grad():
-            camera_tokens_list = []
-            patch_tokens_list = []
-            ress = []  # 官方的结果列表
+        # 重新做一次前向来获取 tokens
+        shape, feat_ls, pos = self.model._encode_views(views)
+        feat = feat_ls[-1]
+        # state_feat, state_pos = self.model._init_state(feat[0], pos[0])
+        # mem = self.model.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
+        # init_state_feat = state_feat.clone()
+        # init_mem = mem.clone()
+        # ========== 🔥 检查是否有缓存状态 ==========
+        if self.cached_state_feat is not None:
+            # 复用上一次的状态
+            state_feat = self.cached_state_feat
+            state_pos = self.cached_state_pos
+            mem = self.cached_mem
+            init_state_feat = self.cached_init_state_feat
+            init_mem = self.cached_init_mem
+            # print("🔄 Reusing cached state")
+        else:
+            # 初始化新状态
+            state_feat, state_pos = self.model._init_state(feat[0], pos[0])
+            mem = self.model.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
+            init_state_feat = state_feat.clone()
+            init_mem = mem.clone()
 
-            # 重新做一次前向来获取 tokens
-            shape, feat_ls, pos = self.model._encode_views(views)
-            feat = feat_ls[-1]
-            # state_feat, state_pos = self.model._init_state(feat[0], pos[0])
-            # mem = self.model.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
-            # init_state_feat = state_feat.clone()
-            # init_mem = mem.clone()
-            # ========== 🔥 检查是否有缓存状态 ==========
-            if self.cached_state_feat is not None:
-                # 复用上一次的状态
-                state_feat = self.cached_state_feat
-                state_pos = self.cached_state_pos
-                mem = self.cached_mem
-                init_state_feat = self.cached_init_state_feat
-                init_mem = self.cached_init_mem
-                # print("🔄 Reusing cached state")
+        for i in range(len(views)):
+            feat_i = feat[i]
+            pos_i = pos[i]
+
+            if self.model.pose_head_flag:
+                global_img_feat_i = self.model._get_img_level_feat(feat_i)
+                if i == 0:
+                    pose_feat_i = self.model.pose_token.expand(feat_i.shape[0], -1, -1)
+                else:
+                    pose_feat_i = self.model.pose_retriever.inquire(global_img_feat_i, mem)
+                pose_pos_i = -torch.ones(
+                    feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype
+                )
             else:
-                # 初始化新状态
-                state_feat, state_pos = self.model._init_state(feat[0], pos[0])
-                mem = self.model.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
-                init_state_feat = state_feat.clone()
-                init_mem = mem.clone()
+                pose_feat_i = None
+                pose_pos_i = None
 
-            for i in range(len(views)):
-                feat_i = feat[i]
-                pos_i = pos[i]
+            new_state_feat, dec = self.model._recurrent_rollout(
+                state_feat, state_pos, feat_i, pos_i,
+                pose_feat_i, pose_pos_i, init_state_feat,
+                img_mask=views[i]["img_mask"],
+                reset_mask=views[i]["reset"],
+                update=views[i].get("update", None),
+            )
 
-                if self.model.pose_head_flag:
-                    global_img_feat_i = self.model._get_img_level_feat(feat_i)
-                    if i == 0:
-                        pose_feat_i = self.model.pose_token.expand(feat_i.shape[0], -1, -1)
-                    else:
-                        pose_feat_i = self.model.pose_retriever.inquire(global_img_feat_i, mem)
-                    pose_pos_i = -torch.ones(
-                        feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype
-                    )
-                else:
-                    pose_feat_i = None
-                    pose_pos_i = None
+            # 提取 tokens
+            camera_tokens_list.append(dec[-1][:, :1])  # [B, 1, 768]
+            patch_tokens_list.append(dec[-1][:, 1:])  # [B, 729, 768]
+            
+            out_pose_feat_i = dec[-1][:, 0:1]
+            new_mem = self.model.pose_retriever.update_mem(
+                mem, global_img_feat_i, out_pose_feat_i
+            )
+            # 🔥 关键：从 dec 提取多层特征（完全按照官方）
+            assert len(dec) == self.model.dec_depth + 1
+            head_input = [
+                dec[0].float(),                                    # 最浅层
+                dec[self.model.dec_depth * 2 // 4][:, 1:].float(),  # 中层（只要patch tokens）
+                dec[self.model.dec_depth * 3 // 4][:, 1:].float(),  # 深层（只要patch tokens）
+                dec[self.model.dec_depth].float(),                 # 最深层（dec[-1]）
+            ]
+            
+            # 🔥 调用官方的 downstream head（包含所有后处理）
+            res = self.model._downstream_head(head_input, shape[i], pos=pos_i)
+            ress.append(res)
 
-                new_state_feat, dec = self.model._recurrent_rollout(
-                    state_feat, state_pos, feat_i, pos_i,
-                    pose_feat_i, pose_pos_i, init_state_feat,
-                    img_mask=views[i]["img_mask"],
-                    reset_mask=views[i]["reset"],
-                    update=views[i].get("update", None),
-                )
+            # 更新状态（与官方完全一致）
+            img_mask = views[i]["img_mask"]
+            update = views[i].get("update", None)
+            if update is not None:
+                update_mask = (img_mask & update)
+            else:
+                update_mask = img_mask
+            update_mask = update_mask[:, None, None].float()
 
-                # 提取 tokens
-                camera_tokens_list.append(dec[-1][:, :1])  # [B, 1, 768]
-                patch_tokens_list.append(dec[-1][:, 1:])  # [B, 729, 768]
-                
-                out_pose_feat_i = dec[-1][:, 0:1]
-                new_mem = self.model.pose_retriever.update_mem(
-                    mem, global_img_feat_i, out_pose_feat_i
-                )
-                # 🔥 关键：从 dec 提取多层特征（完全按照官方）
-                assert len(dec) == self.model.dec_depth + 1
-                head_input = [
-                    dec[0].float(),                                    # 最浅层
-                    dec[self.model.dec_depth * 2 // 4][:, 1:].float(),  # 中层（只要patch tokens）
-                    dec[self.model.dec_depth * 3 // 4][:, 1:].float(),  # 深层（只要patch tokens）
-                    dec[self.model.dec_depth].float(),                 # 最深层（dec[-1]）
-                ]
-                
-                # 🔥 调用官方的 downstream head（包含所有后处理）
-                res = self.model._downstream_head(head_input, shape[i], pos=pos_i)
-                ress.append(res)
+            state_feat = new_state_feat * update_mask + state_feat * (1 - update_mask)
+            mem = new_mem * update_mask + mem * (1 - update_mask)
+            
+            reset_mask = views[i]["reset"]
+            if reset_mask is not None:
+                reset_mask = reset_mask[:, None, None].float()
+                state_feat = init_state_feat * reset_mask + state_feat * (1 - reset_mask)
+                mem = init_mem * reset_mask + mem * (1 - reset_mask)
 
-                # 更新状态（与官方完全一致）
-                img_mask = views[i]["img_mask"]
-                update = views[i].get("update", None)
-                if update is not None:
-                    update_mask = (img_mask & update)
-                else:
-                    update_mask = img_mask
-                update_mask = update_mask[:, None, None].float()
+        # 拼接所有帧的 tokens
+        camera_tokens = torch.cat(camera_tokens_list, dim=0)  # [F*B, 1, 768]
+        patch_tokens = torch.cat(patch_tokens_list, dim=0)  # [F*B, 729, 768]
 
-                state_feat = new_state_feat * update_mask + state_feat * (1 - update_mask)
-                mem = new_mem * update_mask + mem * (1 - update_mask)
-                
-                reset_mask = views[i]["reset"]
-                if reset_mask is not None:
-                    reset_mask = reset_mask[:, None, None].float()
-                    state_feat = init_state_feat * reset_mask + state_feat * (1 - reset_mask)
-                    mem = init_mem * reset_mask + mem * (1 - reset_mask)
+        self.cached_state_feat = state_feat.detach()
+        self.cached_state_pos = state_pos.detach()
+        self.cached_mem = mem.detach()
+        self.cached_init_state_feat = init_state_feat.detach()
+        self.cached_init_mem = init_mem.detach()
 
-                # 更新状态
-                # if self.model.pose_head_flag:
-                #     out_pose_feat_i = dec[-1][:, 0:1]
-                #     new_mem = self.model.pose_retriever.update_mem(mem, global_img_feat_i, out_pose_feat_i)
-                # else:
-                #     new_mem = mem
-
-                # img_mask = views[i]["img_mask"]
-                # update = views[i].get("update", None)
-                # update_mask = (img_mask & update) if update is not None else img_mask
-                # update_mask = update_mask[:, None, None].float()
-
-                # state_feat = new_state_feat * update_mask + state_feat * (1 - update_mask)
-                # mem = new_mem * update_mask + mem * (1 - update_mask)
-
-                # reset_mask = views[i]["reset"]
-                # if reset_mask is not None and reset_mask.any():
-                #     reset_mask = reset_mask[:, None, None].float()
-                #     state_feat = init_state_feat * reset_mask + state_feat * (1 - reset_mask)
-                #     mem = init_mem * reset_mask + mem * (1 - reset_mask)
-
-            # 拼接所有帧的 tokens
-            camera_tokens = torch.cat(camera_tokens_list, dim=0)  # [F*B, 1, 768]
-            patch_tokens = torch.cat(patch_tokens_list, dim=0)  # [F*B, 729, 768]
-
-            self.cached_state_feat = state_feat.detach()
-            self.cached_state_pos = state_pos.detach()
-            self.cached_mem = mem.detach()
-            self.cached_init_state_feat = init_state_feat.detach()
-            self.cached_init_mem = init_mem.detach()
-
-            return ress, camera_tokens, patch_tokens
+        return ress, camera_tokens, patch_tokens
 
 def reconstruct_pointcloud_from_depth(pts3d, rgb, conf=None, conf_threshold=0.5):
     """

@@ -10,6 +10,7 @@ from model.internvl3.internvl3_embedder_cut3r import InternVL3Embedder
 from model.action_head.flow_matching import FlowmatchingActionHead
 import logging
 from scripts.cut3r_encoder_lyh import prepare_input
+from torch.utils.checkpoint import checkpoint
 
 class CrossAttentionFusion(nn.Module):
     def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads):
@@ -76,16 +77,12 @@ class EVO1(nn.Module):
         is_training = config.get("training", True)
         if self.use_cut3r and not is_training:
             from scripts.cut3r_encoder_lyh import CUT3REncoder
-            
             cut3r_weights = "/opt/liblibai-models/user-workspace2/users/lyh/Evo-1/Evo_1/spatial_encoder_checkpoint/cut3r_512_dpt_4_64.pth"
-            
             self.cut3r_encoder = CUT3REncoder(
                 model_path=cut3r_weights,
                 device=self._device
             )
-            self.cut3r_encoder.model.eval()
-            print(f"✅ Initialized new CUT3R Encoder from cut3r_encoder_lyh.py")
-            
+            print(f"✅ Initialized new CUT3R Encoder from cut3r_encoder_lyh.py")   
         d_vit=896
         d_spatial = 768  # CUT3R输出维度
         
@@ -178,8 +175,9 @@ class EVO1(nn.Module):
         )
         
         # ========== 4. Forward through CUT3R ==========
-        with torch.no_grad():
-            results, camera_tokens, patch_tokens = self.cut3r_encoder.forward(views)
+        
+        # results, camera_tokens, patch_tokens = self.cut3r_encoder.forward(views)
+        results, camera_tokens, patch_tokens = checkpoint(self.cut3r_encoder.forward, views)
         
         # camera_tokens: [F*B, 1, 768] = [1*3, 1, 768] = [3, 1, 768]
         # patch_tokens: [F*B, 729, 768] = [3, 729, 768]
@@ -201,23 +199,26 @@ class EVO1(nn.Module):
         image_mask: torch.Tensor,  
         prompt: str = "",
         return_cls_only: Union[bool, None] = None,
-        spatial_tokens: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
 
         if return_cls_only is None:
             return_cls_only = self.return_cls_only
-        
+        B, F, V, C, H, W = images.shape
+        print(f"[get_vl_embeddings] images shape: {images.shape}")
         # ========== 智能获取 spatial_tokens ==========
         if self.use_cut3r:
-            if spatial_tokens is None:
-                # 外界没有传入，实时提取
-                spatial_tokens = self._extract_spatial_features(images)
-            # else: 使用外界传入的 spatial_tokens
-            else:
-                spatial_tokens = spatial_tokens.to(dtype=torch.bfloat16)
-        else:
-            spatial_tokens = None  # 不使用 CUT3R
-        
+            self.cut3r_encoder.reset_state()
+        all_frames_tokens = []
+        for t in range(F):
+            # 提取当前时间步所有视角的图像 [B, V, C, H, W]
+            current_frame_images = images[:, t] 
+            
+            # 实时提取特征 [B, V, 730, 768]
+            # 这里建议内部配合我们之前说的梯度检查点 (Gradient Checkpointing)
+            spatial_tokens_t = self._extract_spatial_features(current_frame_images)
+            all_frames_tokens.append(spatial_tokens_t)
+        # 拼接成 [B, F, V, 730, 768]
+        multiframe_spatial_tokens = torch.stack(all_frames_tokens, dim=1)
         if images is None or len(images) == 0:
             raise ValueError("Must provide at least one image (PIL.Image). Got `images=None` or empty list.")
         return self.embedder.get_fused_image_text_embedding_from_tensor_images(
@@ -225,7 +226,7 @@ class EVO1(nn.Module):
             image_mask=image_mask,
             text_prompt=prompt,
             return_cls_only=return_cls_only,
-            spatial_tokens=spatial_tokens,
+            spatial_tokens=multiframe_spatial_tokens
         )
 
     def prepare_state(self, state_input: Union[list, torch.Tensor]) -> torch.Tensor:
@@ -328,3 +329,10 @@ class EVO1(nn.Module):
                 print("No_fusion_block")
         else:
             print("Finetuning Fusion Block...")
+
+        if not config.get("finetune_cut3r", False):
+            # 冻结：参数不更新，且模式设为 eval
+            self._freeze_module(self.cut3r_encoder, "CUT3R")
+            self.cut3r_encoder.eval()
+        else:
+            print("Finetuning CUT3R...")

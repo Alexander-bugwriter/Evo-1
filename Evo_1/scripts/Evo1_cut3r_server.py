@@ -17,7 +17,64 @@ from fvcore.nn import FlopCountAnalysis
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from scripts.Evo1_cut3r import EVO1
 
+class ImageBuffer:
+    def __init__(self, window_size=4, num_views=3, target_size=448):
+        self.window_size = window_size
+        self.num_views = num_views
+        self.target_size = target_size
+        # 存储预处理后的 Tensor 列表，每个元素形状为 [V, C, H, W]
+        self.buffer = []
+        
+        # 预处理转换（必须与训练时的 Normalize 严格一致）
+        self.transform = transforms.Compose([
+            transforms.Resize((target_size, target_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+        ])
+    def push(self, pil_images: List[Image.Image]):
+        """
+        接收当前时刻的视角图像列表（通常是 3 张）
+        """
+        if len(pil_images) != self.num_views:
+            print(f"Warning: Expected {self.num_views} views, but got {len(pil_images)}")
 
+        # 1. 预处理并堆叠当前时刻视角: [V, C, H, W]
+        current_t_tensors = []
+        for img in pil_images:
+            # 确保是 RGB
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            current_t_tensors.append(self.transform(img))
+        
+        current_t_tensor = torch.stack(current_t_tensors) 
+
+        # 2. 压入队列
+        self.buffer.append(current_t_tensor)
+
+        # 3. 超过窗口长度则弹出最旧的
+        if len(self.buffer) > self.window_size:
+            self.buffer.pop(0)
+    def get_stacked_tensor(self):
+        """
+        返回组织好的 [F, V, C, H, W] 张量
+        """
+        if not self.buffer:
+            return None
+            
+        # --- 核心修改：低于长度填充逻辑 ---
+        # 如果当前 buffer 只有 1 帧，我们要复制它 3 次凑齐 4 帧
+        # 如果有 2 帧，我们要复制第一帧 2 次凑齐 4 帧，以此类推
+        temp_buffer = list(self.buffer) # 浅拷贝防止修改原始 buffer
+        
+        while len(temp_buffer) < self.window_size:
+            # 始终拿当前队列里最老的一帧（index 0）填充在最前面
+            temp_buffer.insert(0, temp_buffer[0])
+            
+        # 最终堆叠成 [4, 3, 3, 448, 448]
+        return torch.stack(temp_buffer)
+    def clear(self):
+        """用于任务重置或切换场景"""
+        self.buffer = []
 
 class Normalizer:
     def __init__(self, stats_or_path):
@@ -109,24 +166,42 @@ def decode_image_from_list(img_list):
     return transforms.ToTensor()(pil).to("cuda")
 
 
-
+global_image_buffer = ImageBuffer(window_size=4, num_views=3)
 def infer_from_json_dict(data: dict, model, normalizer):
     device = "cuda"
     model_dtype = next(model.parameters()).dtype
 
     if data.get("reset", False):
-        print("🔄 Received RESET signal, resetting CUT3R state...")
+        print("🔄 Received RESET signal, resetting memory state...")
         try:
-            model.cut3r_encoder.reset_state()
+            global_image_buffer.clear()
         except:
-            print("No spatial encoder")
+            print("No memory buffer to reset.")
   
-    images = [decode_image_from_list(img) for img in data["image"]]
-    assert len(images) == 3, "Must provide exactly 3 images."
-    for img in images:
+    # images = [decode_image_from_list(img) for img in data["image"]]
+    # assert len(images) == 3, "Must provide exactly 3 images."
+    # for img in images:
+    #     assert img.shape == (3, 448, 448), "image_size must be (3,448,448)"
+    current_images = [decode_image_from_list(img) for img in data["image"]]
+    assert len(current_images) == 3, "Must provide exactly 3 images."
+    for img in current_images:
         assert img.shape == (3, 448, 448), "image_size must be (3,448,448)"
+    
+    
+    # 2. 更新缓存
+    global_image_buffer.push(current_images)
+    
+    # 3. 获取 [F, V, C, H, W] 张量，并增加 Batch 维度变为 [1, 4, 3, 3, 448, 448]
+    multiframe_images_tensor = global_image_buffer.get_stacked_tensor()
+    multiframe_images_tensor = multiframe_images_tensor.unsqueeze(0).to(model.device)
+    print(f"multiframe_images_tensor.shape,{multiframe_images_tensor.shape}")
 
- 
+    current_img_mask = torch.tensor(data["image_mask"], dtype=torch.bool, device=device)
+    multiframe_image_mask = current_img_mask.unsqueeze(0).repeat(4, 1)  # [V] -> [F, V]
+    multiframe_image_mask = multiframe_image_mask.unsqueeze(0)  # [1, F, V]
+    print(f"multiframe_image_mask,{multiframe_image_mask}")
+    print(f"multiframe_image_mask.shape,{multiframe_image_mask.shape}")
+
     state = torch.tensor(data["state"], dtype=torch.float32, device=device)
     if state.ndim == 1:
         state = state.unsqueeze(0)
@@ -144,8 +219,8 @@ def infer_from_json_dict(data: dict, model, normalizer):
     
     with torch.no_grad() and torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
         action = model.run_inference(
-            images=images,
-            image_mask=image_mask,
+            images=multiframe_images_tensor,
+            image_mask=multiframe_image_mask,
             prompt=prompt,
             state_input=norm_state,
             action_mask=action_mask,
@@ -154,6 +229,50 @@ def infer_from_json_dict(data: dict, model, normalizer):
         action = action.reshape(1, -1, 24)
         action = normalizer.denormalize_action(action[0])
         return action.cpu().numpy().tolist()
+# def infer_from_json_dict(data: dict, model, normalizer):
+#     device = "cuda"
+#     model_dtype = next(model.parameters()).dtype
+
+#     if data.get("reset", False):
+#         print("🔄 Received RESET signal, resetting CUT3R state...")
+#         try:
+#             model.cut3r_encoder.reset_state()
+#         except:
+#             print("No spatial encoder")
+  
+#     images = [decode_image_from_list(img) for img in data["image"]]
+#     assert len(images) == 3, "Must provide exactly 3 images."
+#     for img in images:
+#         assert img.shape == (3, 448, 448), "image_size must be (3,448,448)"
+
+ 
+#     state = torch.tensor(data["state"], dtype=torch.float32, device=device)
+#     if state.ndim == 1:
+#         state = state.unsqueeze(0)
+#     if state.shape[1] < 24:
+#         state = torch.cat([state, torch.zeros((1, 24 - state.shape[1]), device=device)], dim=1)
+#     norm_state = normalizer.normalize_state(state).to(dtype=torch.float32)
+
+    
+#     prompt = data["prompt"]
+#     image_mask = torch.tensor(data["image_mask"], dtype=torch.int32, device=device)
+#     action_mask = torch.tensor([data["action_mask"]],dtype=torch.int32, device=device)
+
+#     print(f"image_mask,{image_mask}")
+#     print(f"action_mask,{action_mask}")
+    
+#     with torch.no_grad() and torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+#         action = model.run_inference(
+#             images=images,
+#             image_mask=image_mask,
+#             prompt=prompt,
+#             state_input=norm_state,
+#             action_mask=action_mask,
+            
+#         )
+#         action = action.reshape(1, -1, 24)
+#         action = normalizer.denormalize_action(action[0])
+#         return action.cpu().numpy().tolist()
 
 
 #async def handle_request(websocket, model, normalizer):
