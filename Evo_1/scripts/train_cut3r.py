@@ -444,20 +444,21 @@ def train(config):
             # for prompt, images, image_mask in zip(prompts, images_batch, image_masks):
             #     fused = model.get_vl_embeddings(images=images, image_mask=image_mask, prompt=prompt, return_cls_only=False)
             #     fused_tokens_list.append(fused.to(dtype=torch.bfloat16))
-            for i, (prompt, images, image_mask) in enumerate(zip(prompts, images_batch, image_masks)):
+            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+                for i, (prompt, images, image_mask) in enumerate(zip(prompts, images_batch, image_masks)):
                 # 取出当前样本的 spatial_tokens
                 
-                fused = model.get_vl_embeddings(
-                    images=images, 
-                    image_mask=image_mask, 
-                    prompt=prompt, 
-                    return_cls_only=False,
-                )
-                fused_tokens_list.append(fused.to(dtype=torch.bfloat16))
+                    fused = model.get_vl_embeddings(
+                        images=images, 
+                        image_mask=image_mask, 
+                        prompt=prompt, 
+                        return_cls_only=False,
+                    )
+                    fused_tokens_list.append(fused.to(dtype=torch.bfloat16))
 
-            fused_tokens = torch.cat(fused_tokens_list, dim=0)
+                fused_tokens = torch.cat(fused_tokens_list, dim=0)
 
-            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            #with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
 
                 pred_velocity, noise = model(fused_tokens, state=states, actions_gt=actions_gt, action_mask=action_mask)
                 

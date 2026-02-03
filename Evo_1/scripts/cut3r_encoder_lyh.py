@@ -88,7 +88,7 @@ def prepare_input(pixel_values, device, target_size=512):
     return views
 
 
-class CUT3REncoder:
+class CUT3REncoder(nn.Module):
     """极简 CUT3R Encoder"""
 
     def __init__(self, model_path, device='cuda'):
@@ -97,6 +97,7 @@ class CUT3REncoder:
             model_path: CUT3R 权重路径
             device: 设备
         """
+        super().__init__()
         self.device = device
         # 加载模型
         print(f"Loading CUT3R from {model_path}")
@@ -117,7 +118,7 @@ class CUT3REncoder:
         self.cached_mem = None
         self.cached_init_state_feat = None
         self.cached_init_mem = None
-        print("🔄 [CUT3REncoder] State cache cleared")
+        #print("🔄 [CUT3REncoder] State cache cleared")
 
     def forward(self, views):
         """

@@ -73,7 +73,8 @@ class InternVL3Embedder(nn.Module):
         super().__init__()
         self.device = device
         self.image_size = image_size
-        self.max_text_length = 1024  # InternVL3 supports up to 1024 tokens
+        #self.max_text_length = 1024  # InternVL3 supports up to 1024 tokens
+        self.max_text_length = 4096
         self.transform = build_transform(image_size)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, use_fast=False)
         self.model = AutoModel.from_pretrained(
@@ -90,7 +91,7 @@ class InternVL3Embedder(nn.Module):
 
         else:
             layers = self.model.language_model.layers
-        layers = layers[:14]
+        #layers = layers[:14]
 
         if hasattr(self.model.language_model, 'model'):
             self.model.language_model.model.layers = torch.nn.ModuleList(layers)
@@ -134,10 +135,18 @@ class InternVL3Embedder(nn.Module):
     ) -> str:
 
         prompt = ''
-        for i in range(len(num_tiles_list)):
-            prompt += f"Image-{i+1}: <image>\n"
+        total_images = len(num_tiles_list)
+        #for i in range(len(num_tiles_list)):
+        #    prompt += f"Image-{i+1}: <image>\n"
+        #prompt += text_prompt.strip()
+        current_frame_start_idx = total_images - 3
+        for i in range(total_images):
+            if i < current_frame_start_idx:
+                prefix = "History-Image"
+            else:
+                prefix = "Current-Image"
+            prompt += f"{prefix}-{i+1}: <image>\n"
         prompt += text_prompt.strip()
-
         IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
         IMG_START_TOKEN = "<img>"
         IMG_END_TOKEN = "</img>"
@@ -147,7 +156,7 @@ class InternVL3Embedder(nn.Module):
             token_count = self.model.num_image_token * tile_count
             image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * token_count + IMG_END_TOKEN
             prompt = prompt.replace("<image>", image_tokens, 1)
-
+        #print(f"[DEBUG _build_prompt] Prompt : {prompt}...")
         return prompt
     
     # def _prepare_and_fuse_embeddings(
@@ -252,7 +261,18 @@ class InternVL3Embedder(nn.Module):
         # 3. 填充视觉特征 (核心一步：利用布尔掩码直接覆盖)
         # img_token_mask 是 [1, L] 的布尔矩阵
         img_token_mask = (input_ids == self.img_context_token_id) 
+        # 🔥 [DEBUG] 核心索引检查
+        num_placeholders = img_token_mask.sum().item()
+        num_vit_tokens = vit_embeds.shape[0] * vit_embeds.shape[1] if vit_embeds.dim() > 2 else vit_embeds.shape[0]
         
+        #print(f"\n[DEBUG _fuse] Checking Alignment:")
+        #print(f"  - Input IDs shape: {input_ids.shape}")
+        #print(f"  - ViT Embeds shape input: {vit_embeds.shape}")
+        #print(f"  - Count of <IMG_CONTEXT> in prompt: {num_placeholders}")
+        #print(f"  - Count of ViT tokens provided: {num_vit_tokens}")
+        
+        #if num_placeholders != num_vit_tokens:
+        #    print(f"  ❌ MISMATCH DETECTED! shape mismatch will likely occur below.") 
         # vit_embeds.view(-1, C) 形状必须等于 img_token_mask 中 True 的数量
         # 这种写法比 reshape(B*N, C) 更安全，因为它不改变原始 input_embeds 的物理排布
         input_embeds[img_token_mask] = vit_embeds.view(-1, input_embeds.shape[-1])
@@ -345,6 +365,10 @@ class InternVL3Embedder(nn.Module):
         return_cls_only: bool = True,
         spatial_tokens: Optional[torch.Tensor] = None  # [B, F, V, 730, 768]
     ):
+        # 🔥 [DEBUG] 打印输入图片形状
+        #print(f"\n[DEBUG get_fused] Received image_tensors shape: {image_tensors.shape}")
+        #if spatial_tokens is not None:
+        #    print(f"[DEBUG get_fused] Received spatial_tokens shape: {spatial_tokens.shape}")
         # 1. 展平维度：将多帧多视角看作一整个图片序列
         B, F, V, C, H, W = image_tensors.shape
         num_imgs_per_sample = F * V  # 比如 12
@@ -376,8 +400,10 @@ class InternVL3Embedder(nn.Module):
         inputs_embeds, attention_mask = self._prepare_and_fuse_embeddings(
             prompt=prompt,
             vit_embeds=fused_embeds,
-            image_mask=image_mask.view(B, -1), # 展平为 [B, 12]
+            #image_mask=image_mask.view(B, -1), # 展平为 [B, 12]
+            image_mask=image_mask.view(-1),
             num_tiles_list=num_tiles_list
+
         )
 
         # 5. LLM 推理

@@ -172,7 +172,7 @@ class LeRobotDatasetCUT3R(Dataset):
         binarize_gripper: bool = False,
         cache_dir: Union[str, Path] = None,  
         use_augmentation: bool = False,
-        num_history_frames: int = 3,
+        num_history_frames: int = 2,
         video_sample_range: int = 50,
     ):
         self.config = config

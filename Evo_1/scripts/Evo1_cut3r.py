@@ -11,6 +11,7 @@ from model.action_head.flow_matching import FlowmatchingActionHead
 import logging
 from scripts.cut3r_encoder_lyh import prepare_input
 from torch.utils.checkpoint import checkpoint
+from scripts.cut3r_encoder_lyh import CUT3REncoder
 
 class CrossAttentionFusion(nn.Module):
     def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads):
@@ -34,6 +35,15 @@ class CrossAttentionFusion(nn.Module):
         # 在 CrossAttentionFusion.__init__ 最后加这两行
         #nn.init.constant_(self.out_proj.weight, 0.0)
         #nn.init.constant_(self.out_proj.bias, 0.0)
+        self.gate = nn.Sequential(
+            nn.Linear(d_clip, d_clip),
+            nn.Sigmoid()
+        )
+        # 初始化 Gate 的 Linear 层偏置为 -1.5
+        # Sigmoid(-1.5) ≈ 0.18
+        # 这意味着初始时刻，只有 18% 的 spatial 特征会被加进去，82% 保留原始 CLIP 特征
+        # 既保护了主干，又保证了梯度能流过 (比纯 0 初始化更好)
+        nn.init.constant_(self.gate[0].bias, -1.5)
     def forward(self, clip_features, spatial_encoder_features):
         """
         Args:
@@ -50,20 +60,24 @@ class CrossAttentionFusion(nn.Module):
         spatial_encoder_key_proj = self.spatial_encoder_key_proj(spatial_encoder_features_norm)  # [B, N, D_attn]
         spatial_encoder_value_proj = self.spatial_encoder_value_proj(spatial_encoder_features_norm)  # [B, N, D_attn]
         # cross attention
-        fused_features, attn_weights = self.cross_attention(
+        attn_out, attn_weights = self.cross_attention(
             query=clip_query_proj,
             key=spatial_encoder_key_proj,
             value=spatial_encoder_value_proj
         )
-        # projection to D_clip dimension
-        fused_features = self.out_proj(fused_features)   # [B, N_clip, D_clip]
-        # residual connection and dropout
-        fused_features = self.out_norm(fused_features)
-        fused_features = fused_features + clip_features  # [B, N_clip, D_clip]
-        # print(f'status_of_fused_features: max:{fused_features.max():.2f}, min:{fused_features.min():.2f}, mean:{fused_features.mean():.2f}, std:{fused_features.std():.2f}')
-        # print(f'status_of_clip_features: max:{clip_features.max():.2f}, min:{clip_features.min():.2f}, mean:{clip_features.mean():.2f}, std:{clip_features.std():.2f}')
-        fused_features = self.dropout(fused_features)
+        attn_out = self.out_proj(attn_out) 
+        attn_out = self.out_norm(attn_out)
+        attn_out = self.dropout(attn_out)
+
+        # 计算门控系数 alpha
+        # 我们使用原始的 clip_features (Input) 来决定需要接纳多少 spatial 信息
+        # 逻辑：Backbone 根据自身状态决定“我现在需要多少外部空间信息？”
+        gate_score = self.gate(clip_features)  # [B, N, D_clip] -> 范围 (0, 1)
         
+        # 执行加权残差连接
+        # fused = Original + Gate * Update
+        fused_features = clip_features + gate_score * attn_out
+
         return fused_features, attn_weights
 
 class EVO1(nn.Module):
@@ -75,14 +89,12 @@ class EVO1(nn.Module):
         vlm_name = config.get("vlm_name", "OpenGVLab/InternVL3-1B")
         self.use_cut3r = config.get("use_cut3r", False)
         is_training = config.get("training", True)
-        if self.use_cut3r and not is_training:
-            from scripts.cut3r_encoder_lyh import CUT3REncoder
-            cut3r_weights = "/opt/liblibai-models/user-workspace2/users/lyh/Evo-1/Evo_1/spatial_encoder_checkpoint/cut3r_512_dpt_4_64.pth"
-            self.cut3r_encoder = CUT3REncoder(
+        cut3r_weights = "/opt/liblibai-models/user-workspace2/users/lyh/Evo-1/Evo_1/spatial_encoder_checkpoint/cut3r_512_dpt_4_64.pth"
+        self.cut3r_encoder = CUT3REncoder(
                 model_path=cut3r_weights,
                 device=self._device
             )
-            print(f"✅ Initialized new CUT3R Encoder from cut3r_encoder_lyh.py")   
+        print(f"✅ Initialized new CUT3R Encoder from cut3r_encoder_lyh.py")   
         d_vit=896
         d_spatial = 768  # CUT3R输出维度
         
@@ -93,7 +105,7 @@ class EVO1(nn.Module):
             num_heads=16
         )
         self.fusion_block.to(device=self._device, dtype=torch.bfloat16)
-        print(f"✅ Initialized CrossAttentionFusion")
+        print(f"✅ Initialized Cut3r_Fusion")
         self.embedder = InternVL3Embedder(model_name=vlm_name, device=self._device,fusion_block=self.fusion_block)
         #self.embedder = InternVL3Embedder(model_name=vlm_name, device=self._device,fusion_block=None)
 
@@ -165,7 +177,11 @@ class EVO1(nn.Module):
             processed.append(img)
         # ========== 2. 组织成 [F, B, C, H, W] 格式 ==========
         # F=1 (单帧), B=3 (3个视角)
-        pixel_values = torch.stack(processed, dim=0).unsqueeze(0)  # [1, 3, C, H, W]
+        #print("Debug extract_spatial_feature image shape:",images.shape)
+        if images.ndim == 4:
+            pixel_values = torch.stack(processed, dim=0).unsqueeze(0)  # [1, 3, C, H, W]
+        else:
+            pixel_values = images
         #print(f"[_extract_spatial_features] Input shape: {pixel_values.shape}")
         # ========== 3. Prepare input for CUT3R ==========
         views = prepare_input(
@@ -176,8 +192,8 @@ class EVO1(nn.Module):
         
         # ========== 4. Forward through CUT3R ==========
         
-        # results, camera_tokens, patch_tokens = self.cut3r_encoder.forward(views)
-        results, camera_tokens, patch_tokens = checkpoint(self.cut3r_encoder.forward, views)
+        results, camera_tokens, patch_tokens = self.cut3r_encoder.forward(views)
+        #results, camera_tokens, patch_tokens = checkpoint(self.cut3r_encoder.forward, views)
         
         # camera_tokens: [F*B, 1, 768] = [1*3, 1, 768] = [3, 1, 768]
         # patch_tokens: [F*B, 729, 768] = [3, 729, 768]
@@ -188,7 +204,7 @@ class EVO1(nn.Module):
         # ========== 5. 拼接 camera 和 patch tokens ==========
         # 拼接后: [3, 730, 768]
         spatial_tokens = torch.cat([camera_tokens, patch_tokens], dim=1)
-        
+        spatial_tokens = spatial_tokens.unsqueeze(0) 
         #print(f"[_extract_spatial_features] Output spatial_tokens: {spatial_tokens.shape}")
         
         return spatial_tokens.to(dtype=torch.bfloat16)
@@ -200,11 +216,18 @@ class EVO1(nn.Module):
         prompt: str = "",
         return_cls_only: Union[bool, None] = None,
     ) -> torch.Tensor:
-
+        #print(f"[get_vl_embeddings] images shape: {images.shape}")
+        #print(f"[get_vl_embeddings] image_mask shape: {image_mask.shape}")
+        if isinstance(images, torch.Tensor) and images.ndim == 5:
+            # print(f"[Debug] Unsqueezing images/mask for batch processing (B=1)")
+            images = images.unsqueeze(0)         # [F, V, C, H, W] -> [1, F, V, C, H, W]
+            image_mask = image_mask.unsqueeze(0) # [F, V]          -> [1, F, V]
         if return_cls_only is None:
             return_cls_only = self.return_cls_only
         B, F, V, C, H, W = images.shape
-        print(f"[get_vl_embeddings] images shape: {images.shape}")
+        #print(f"[get_vl_embeddings] after unsqueeze images shape: {images.shape}")
+        #print(f"[get_vl_embeddings] after unsqueeze image_mask shape: {image_mask.shape}")
+
         # ========== 智能获取 spatial_tokens ==========
         if self.use_cut3r:
             self.cut3r_encoder.reset_state()
@@ -212,13 +235,17 @@ class EVO1(nn.Module):
         for t in range(F):
             # 提取当前时间步所有视角的图像 [B, V, C, H, W]
             current_frame_images = images[:, t] 
-            
+            if isinstance(current_frame_images, torch.Tensor):
+                 current_frame_images.requires_grad_(True)     
             # 实时提取特征 [B, V, 730, 768]
             # 这里建议内部配合我们之前说的梯度检查点 (Gradient Checkpointing)
-            spatial_tokens_t = self._extract_spatial_features(current_frame_images)
+            #spatial_tokens_t = self._extract_spatial_features(current_frame_images)
+            spatial_tokens_t = checkpoint(self._extract_spatial_features, current_frame_images)
             all_frames_tokens.append(spatial_tokens_t)
         # 拼接成 [B, F, V, 730, 768]
         multiframe_spatial_tokens = torch.stack(all_frames_tokens, dim=1)
+        #print(f"[get_vl_embeddings] multiframe_spatial_tokens shape: {multiframe_spatial_tokens.shape}")
+ 
         if images is None or len(images) == 0:
             raise ValueError("Must provide at least one image (PIL.Image). Got `images=None` or empty list.")
         return self.embedder.get_fused_image_text_embedding_from_tensor_images(
